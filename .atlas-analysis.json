@@ -1,0 +1,76 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "nanoGPT",
+  "projectDescription": "The simplest, fastest repository for training/finetuning medium-sized GPTs.",
+  "theme": "aspen",
+  "primaryColor": "#8B5CF6",
+  "lightColor": "#A78BFA",
+  "darkColor": "#7C3AED",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get Started",
+        "pages": [
+          "introduction",
+          "installation",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Core Concepts",
+        "pages": [
+          "concepts/architecture",
+          "concepts/configuration",
+          "concepts/data-preparation"
+        ]
+      },
+      {
+        "group": "Training",
+        "pages": [
+          "training/from-scratch",
+          "training/finetuning",
+          "training/distributed",
+          "training/hyperparameters"
+        ]
+      },
+      {
+        "group": "Inference",
+        "pages": [
+          "inference/sampling",
+          "inference/loading-models",
+          "inference/performance"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/model-api",
+          "reference/configuration",
+          "reference/command-line",
+          "reference/benchmarking"
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Simple ~300-line training loop and model definition",
+    "Reproduces GPT-2 (124M) on OpenWebText in ~4 days",
+    "Supports training from scratch or finetuning pretrained models",
+    "Distributed training with PyTorch DDP",
+    "PyTorch 2.0 compilation for faster training",
+    "Flash Attention support for efficient inference",
+    "Character-level and BPE tokenization",
+    "Flexible configuration system"
+  ],
+  "publicApiSurface": [
+    "GPT (model class)",
+    "GPTConfig (configuration dataclass)",
+    "GPT.from_pretrained()",
+    "GPT.generate()",
+    "GPT.configure_optimizers()",
+    "train.py (training script)",
+    "sample.py (inference script)",
+    "bench.py (benchmarking script)",
+    "configurator.py (configuration system)"
+  ]
+}
