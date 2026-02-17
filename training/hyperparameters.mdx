@@ -1,0 +1,565 @@
+---
+title: Training Hyperparameters
+description: Complete guide to nanoGPT training hyperparameters and optimization settings
+---
+
+# Training Hyperparameters
+
+This guide covers all the key hyperparameters in nanoGPT's training script. Understanding these parameters will help you train better models and debug training issues.
+
+## Model Architecture
+
+These parameters define the transformer model structure.
+
+### Layer Configuration
+
+```python
+n_layer = 12   # Number of transformer blocks
+n_head = 12    # Number of attention heads per layer  
+n_embd = 768   # Embedding dimension
+```
+
+<Tabs>
+  <Tab title="GPT-2 (124M)">
+    ```python
+    n_layer = 12
+    n_head = 12
+    n_embd = 768
+    # Total parameters: ~124M
+    ```
+  </Tab>
+  
+  <Tab title="GPT-2 Medium (350M)">
+    ```python
+    n_layer = 24
+    n_head = 16
+    n_embd = 1024
+    # Total parameters: ~350M
+    ```
+  </Tab>
+  
+  <Tab title="GPT-2 Large (774M)">
+    ```python
+    n_layer = 36
+    n_head = 20
+    n_embd = 1280
+    # Total parameters: ~774M
+    ```
+  </Tab>
+  
+  <Tab title="GPT-2 XL (1558M)">
+    ```python
+    n_layer = 48
+    n_head = 25
+    n_embd = 1600
+    # Total parameters: ~1558M
+    ```
+  </Tab>
+  
+  <Tab title="Baby GPT">
+    ```python
+    n_layer = 6
+    n_head = 6
+    n_embd = 384
+    # Small model for quick experiments
+    ```
+  </Tab>
+</Tabs>
+
+### Context Length
+
+```python
+block_size = 1024  # Maximum sequence length (context window)
+```
+
+- **GPT-2 default**: 1024 tokens
+- **Character models**: Often 256-512 characters
+- **Memory impact**: Longer contexts require more memory (quadratic in attention)
+
+<Tip>
+  If you encounter out-of-memory errors, reducing `block_size` is one of the most effective ways to decrease memory usage.
+</Tip>
+
+### Regularization
+
+```python
+dropout = 0.0  # Dropout probability
+bias = False   # Use bias in Linear and LayerNorm layers
+```
+
+**Dropout recommendations**:
+- **Pretraining (large datasets)**: `dropout = 0.0`
+- **Finetuning (small datasets)**: `dropout = 0.1` to `0.2`
+- **Overfitting**: Increase dropout up to `0.3`
+
+**Bias parameter**:
+- `bias = False` is more efficient and follows GPT-2 architecture
+- `bias = True` adds learnable biases (slightly more parameters)
+
+## Batch Size and Gradient Accumulation
+
+These control how many examples are processed per optimization step.
+
+### Core Parameters
+
+```python
+batch_size = 12                      # Micro-batch size per GPU
+gradient_accumulation_steps = 40     # Accumulate gradients over N batches
+```
+
+### Effective Batch Size
+
+The **effective batch size** is calculated as:
+
+```python
+effective_batch_size = batch_size × gradient_accumulation_steps × num_gpus × block_size
+```
+
+**Example** (GPT-2 training on 8 GPUs):
+```python
+batch_size = 12
+gradient_accumulation_steps = 40
+num_gpus = 8
+block_size = 1024
+
+# Total tokens per optimization step:
+# 12 × 40 × 8 × 1024 = 3,932,160 tokens
+```
+
+<Warning>
+  In DDP mode, `gradient_accumulation_steps` is automatically divided by the number of GPUs. The config file specifies the **total** gradient accumulation.
+</Warning>
+
+### Memory vs. Batch Size Tradeoff
+
+If you have limited memory:
+
+<Steps>
+  <Step title="Decrease micro-batch size">
+    ```python
+    batch_size = 8  # down from 12
+    ```
+  </Step>
+  
+  <Step title="Increase gradient accumulation">
+    ```python
+    gradient_accumulation_steps = 60  # up from 40
+    ```
+    
+    This keeps the effective batch size constant: `8 × 60 = 12 × 40 = 480`
+  </Step>
+</Steps>
+
+<Tip>
+  Setting `batch_size = 1` and using large `gradient_accumulation_steps` allows training very large models on limited memory.
+</Tip>
+
+## Learning Rate
+
+Learning rate is the most important hyperparameter for training.
+
+### Basic Learning Rate
+
+```python
+learning_rate = 6e-4  # Maximum learning rate (0.0006)
+min_lr = 6e-5         # Minimum LR after decay (0.00006)
+```
+
+### Learning Rate by Use Case
+
+<Tabs>
+  <Tab title="Pretraining GPT-2">
+    ```python
+    learning_rate = 6e-4  # 0.0006
+    min_lr = 6e-5         # learning_rate / 10
+    decay_lr = True
+    ```
+  </Tab>
+  
+  <Tab title="Finetuning">
+    ```python
+    learning_rate = 3e-5  # 0.00003 (20x smaller!)
+    decay_lr = False      # Often use constant LR
+    ```
+  </Tab>
+  
+  <Tab title="Small Models">
+    ```python
+    learning_rate = 1e-3  # 0.001 (can go higher)
+    min_lr = 1e-4         # 0.0001
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Using too high a learning rate during finetuning can cause **catastrophic forgetting** where the model loses its pretrained knowledge.
+</Warning>
+
+### Learning Rate Schedule
+
+NanoGPT uses **cosine decay with warmup**:
+
+```python
+decay_lr = True        # Enable LR decay
+warmup_iters = 2000    # Linear warmup for 2000 steps
+lr_decay_iters = 600000  # Decay to min_lr over 600k steps  
+max_iters = 600000     # Total training iterations
+```
+
+The schedule has three phases:
+
+<Steps>
+  <Step title="Linear Warmup (0 to warmup_iters)">
+    ```python
+    lr = learning_rate * (iter + 1) / (warmup_iters + 1)
+    ```
+    
+    Learning rate increases linearly from 0 to `learning_rate`.
+  </Step>
+  
+  <Step title="Cosine Decay (warmup_iters to lr_decay_iters)">
+    ```python
+    decay_ratio = (iter - warmup_iters) / (lr_decay_iters - warmup_iters)
+    coeff = 0.5 * (1.0 + cos(pi * decay_ratio))
+    lr = min_lr + coeff * (learning_rate - min_lr)
+    ```
+    
+    Smooth cosine curve from `learning_rate` down to `min_lr`.
+  </Step>
+  
+  <Step title="Constant at Minimum (after lr_decay_iters)">
+    ```python
+    lr = min_lr
+    ```
+    
+    Stay at minimum learning rate for remaining iterations.
+  </Step>
+</Steps>
+
+<Tip>
+  Following the Chinchilla paper, set `lr_decay_iters` approximately equal to `max_iters` and `min_lr` to about `learning_rate / 10`.
+</Tip>
+
+## Optimizer Settings
+
+NanoGPT uses the AdamW optimizer with weight decay.
+
+### AdamW Parameters
+
+```python
+weight_decay = 1e-1  # 0.1 weight decay
+beta1 = 0.9          # Adam beta1 (momentum)
+beta2 = 0.95         # Adam beta2 (RMSprop-like)
+grad_clip = 1.0      # Gradient clipping threshold
+```
+
+### Parameter Explanations
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `weight_decay` | `1e-1` | L2 regularization strength. Higher values = more regularization. |
+| `beta1` | `0.9` | Momentum parameter. Controls how much to use past gradients. |
+| `beta2` | `0.95` | Second moment parameter. For small datasets, try `0.99`. |
+| `grad_clip` | `1.0` | Clip gradients to this norm. Prevents exploding gradients. |
+
+<Tabs>
+  <Tab title="Standard (GPT-2)">
+    ```python
+    weight_decay = 1e-1
+    beta1 = 0.9
+    beta2 = 0.95
+    grad_clip = 1.0
+    ```
+  </Tab>
+  
+  <Tab title="Small Dataset (Shakespeare)">
+    ```python
+    weight_decay = 1e-1
+    beta1 = 0.9
+    beta2 = 0.99  # Larger beta2 for fewer tokens
+    grad_clip = 1.0
+    ```
+  </Tab>
+</Tabs>
+
+### Gradient Clipping
+
+```python train.py:line_307-309
+if grad_clip != 0.0:
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+```
+
+Gradient clipping prevents training instability:
+- **`grad_clip = 1.0`**: Standard setting
+- **`grad_clip = 0.0`**: Disables clipping (not recommended)
+- **Increase if**: Training is unstable or loss spikes
+
+## Training Duration
+
+### Iteration Settings
+
+```python
+max_iters = 600000      # Total training iterations
+eval_interval = 2000    # Evaluate every N iterations  
+eval_iters = 200        # Number of batches for evaluation
+log_interval = 1        # Log training loss every N iterations
+```
+
+### Calculating Training Time
+
+**Example**: GPT-2 (124M) on OpenWebText
+
+```python
+# Configuration
+max_iters = 600000
+tokens_per_iter = 491520  # See batch size section
+
+# Total tokens
+total_tokens = 600000 * 491520 = 294,912,000,000  # ~300B tokens
+
+# On 8x A100 40GB: ~4 days
+```
+
+### Tokens Per Iteration
+
+The training script reports tokens per iteration:
+
+```python train.py:line_101-102
+tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
+print(f"tokens per iteration will be: {tokens_per_iter:,}")
+```
+
+<Tip>
+  GPT-2 (124M) was trained on ~300B tokens. Smaller models need fewer tokens, while larger models may benefit from more.
+</Tip>
+
+## Data Type and Precision
+
+### Mixed Precision Training
+
+```python
+# Automatically select best dtype
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+```
+
+| Data Type | Precision | Speed | Support |
+|-----------|-----------|-------|----------|
+| `float32` | Full | Baseline | All GPUs |
+| `bfloat16` | Mixed | ~2x faster | Ampere+ (A100, RTX 3090) |
+| `float16` | Mixed | ~2x faster | Most GPUs |
+
+<Warning>
+  `bfloat16` has better numeric stability than `float16` but is only available on newer GPUs (Ampere architecture and later).
+</Warning>
+
+### Automatic GradScaler
+
+```python train.py:line_196
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+```
+
+- **float16**: Uses GradScaler to prevent underflow
+- **bfloat16**: No GradScaler needed (better numeric range)
+- **float32**: No GradScaler needed
+
+## Initialization Options
+
+### Model Initialization
+
+```python
+init_from = 'scratch'  # 'scratch', 'resume', or 'gpt2*'
+```
+
+<Tabs>
+  <Tab title="Scratch">
+    ```python
+    init_from = 'scratch'
+    ```
+    
+    Initialize new model with random weights. Vocabulary size from dataset's `meta.pkl` or defaults to 50304.
+  </Tab>
+  
+  <Tab title="Resume">
+    ```python
+    init_from = 'resume'
+    ```
+    
+    Resume from checkpoint in `out_dir`. Loads model, optimizer, and iteration count.
+  </Tab>
+  
+  <Tab title="GPT-2">
+    ```python
+    init_from = 'gpt2'  # or gpt2-medium, gpt2-large, gpt2-xl
+    ```
+    
+    Load pretrained OpenAI GPT-2 weights for finetuning.
+  </Tab>
+</Tabs>
+
+## Checkpointing
+
+### Checkpoint Settings
+
+```python
+out_dir = 'out'                    # Directory for checkpoints
+always_save_checkpoint = True      # Save after every eval_interval
+eval_only = False                  # Only run evaluation, don't train
+```
+
+### What's Saved
+
+```python train.py:line_277-284
+checkpoint = {
+    'model': raw_model.state_dict(),
+    'optimizer': optimizer.state_dict(),
+    'model_args': model_args,
+    'iter_num': iter_num,
+    'best_val_loss': best_val_loss,
+    'config': config,
+}
+```
+
+Checkpoints include:
+- Model weights
+- Optimizer state (for smooth resumption)
+- Model architecture config
+- Training progress (iteration number, best loss)
+- Full training configuration
+
+## System Settings
+
+### Device Configuration
+
+```python
+device = 'cuda'   # 'cpu', 'cuda', 'cuda:0', 'mps'
+compile = True    # Use PyTorch 2.0 compilation
+```
+
+**Device options**:
+- `'cuda'`: Use default GPU
+- `'cuda:0'`, `'cuda:1'`: Specific GPU
+- `'cpu'`: CPU only (very slow)
+- `'mps'`: Apple Silicon GPU (Mac M1/M2)
+
+**Compilation**:
+- `compile = True`: ~40% faster iteration time (requires PyTorch 2.0+)
+- `compile = False`: More compatible, slightly slower
+
+<Tip>
+  PyTorch 2.0 compilation can reduce iteration time from ~250ms to ~135ms on A100 GPUs without any accuracy loss.
+</Tip>
+
+### Backend for DDP
+
+```python
+backend = 'nccl'  # 'nccl', 'gloo', etc.
+```
+
+- **nccl**: Best for NVIDIA GPUs (default)
+- **gloo**: CPU/cross-platform fallback
+
+## Logging and Monitoring
+
+### Weights & Biases Integration
+
+```python
+wandb_log = False           # Enable W&B logging
+wandb_project = 'owt'       # W&B project name  
+wandb_run_name = 'gpt2'     # Run name in W&B
+```
+
+When enabled, logs:
+- Training and validation loss
+- Learning rate
+- Model FLOPs utilization (MFU)
+
+### Console Logging
+
+```python train.py:line_320-327
+if iter_num % log_interval == 0 and master_process:
+    lossf = loss.item() * gradient_accumulation_steps
+    if local_iter_num >= 5:
+        mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+        running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+    print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+```
+
+Example output:
+```
+iter 0: loss 10.9448, time 356.42ms, mfu -100.00%
+iter 1: loss 10.9308, time 168.48ms, mfu 32.15%
+iter 10: loss 8.7821, time 165.23ms, mfu 35.67%
+```
+
+## Dataset Configuration
+
+```python
+dataset = 'openwebtext'  # Dataset name in data/ directory
+```
+
+The training script loads data from:
+- `data/{dataset}/train.bin`
+- `data/{dataset}/val.bin`
+- `data/{dataset}/meta.pkl` (vocabulary info)
+
+## Example Configurations
+
+### Quick Debugging
+
+```python
+# Fast iteration for debugging
+batch_size = 8
+max_iters = 100
+eval_interval = 10
+log_interval = 1
+compile = False
+```
+
+### Finetuning Setup
+
+```python
+init_from = 'gpt2-xl'
+learning_rate = 3e-5
+decay_lr = False
+max_iters = 20
+batch_size = 1
+gradient_accumulation_steps = 32
+dropout = 0.1
+```
+
+### Production Training (GPT-2)
+
+```python
+init_from = 'scratch'
+batch_size = 12
+gradient_accumulation_steps = 40
+block_size = 1024
+n_layer = 12
+n_head = 12
+n_embd = 768
+learning_rate = 6e-4
+max_iters = 600000
+dropout = 0.0
+compile = True
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="From Scratch Training" icon="rocket" href="/training/from-scratch">
+    Apply these hyperparameters to train from scratch
+  </Card>
+  
+  <Card title="Finetuning" icon="wand-magic-sparkles" href="/training/finetuning">
+    Learn optimal hyperparameters for finetuning
+  </Card>
+  
+  <Card title="Distributed Training" icon="server" href="/training/distributed">
+    Scale training with multiple GPUs
+  </Card>
+  
+  <Card title="Configuration" icon="gear" href="/getting-started/configuration">
+    Learn the configuration system
+  </Card>
+</CardGroup>

@@ -1,0 +1,281 @@
+---
+title: 'Performance Optimization'
+description: 'Optimize inference speed with PyTorch 2.0 and hardware-specific features'
+---
+
+## Overview
+
+nanoGPT leverages modern PyTorch features and hardware capabilities to achieve fast inference. With proper configuration, you can significantly reduce generation time.
+
+## PyTorch 2.0 torch.compile()
+
+The biggest performance gain comes from PyTorch 2.0's compilation:
+
+```python sample.py:52-54
+model.eval()
+model.to(device)
+if compile:
+    model = torch.compile(model) # requires PyTorch 2.0 (optional)
+```
+
+### Performance Impact
+
+From the README, compilation provides substantial speedup:
+
+<Note>
+Using `torch.compile()` can cut iteration time from ~250ms to ~135ms (almost 2x faster). This is a single line of code for significant performance gains.
+</Note>
+
+### Enabling Compilation
+
+<CodeGroup>
+
+```bash Sample Script
+python sample.py --compile=True
+```
+
+```bash Benchmark Script  
+python bench.py --compile=True
+```
+
+</CodeGroup>
+
+<Tip>
+Compilation is enabled by default in `bench.py` but disabled in `sample.py`. Enable it for faster generation when using pretrained models.
+</Tip>
+
+### Platform Compatibility
+
+```bash
+# Disable compile on unsupported platforms (e.g., Windows)
+python sample.py --compile=False
+```
+
+PyTorch 2.0 compilation is experimental and not available on all platforms. If you encounter errors, disable it with `--compile=False`.
+
+## Flash Attention
+
+Flash Attention provides memory-efficient attention computation:
+
+```python model.py:44-64
+# flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+if not self.flash:
+    print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+    # causal mask to ensure that attention is only applied to the left in the input sequence
+    self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                .view(1, 1, config.block_size, config.block_size))
+
+def forward(self, x):
+    B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+
+    # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+    q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+    k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+    q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+    v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+    # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+    if self.flash:
+        # efficient attention using Flash Attention CUDA kernels
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+```
+
+Flash Attention is automatically detected and used when available in PyTorch >= 2.0. It provides:
+- Faster attention computation
+- Lower memory usage
+- Better scaling for long sequences
+
+<Note>
+No configuration needed - Flash Attention is automatically enabled when PyTorch >= 2.0 is detected.
+</Note>
+
+## Device Selection
+
+### CUDA GPUs
+
+```bash
+python sample.py --device=cuda
+```
+
+For multi-GPU systems, specify the GPU:
+
+```bash
+python sample.py --device=cuda:0  # First GPU
+python sample.py --device=cuda:1  # Second GPU
+```
+
+### CPU
+
+```bash
+python sample.py --device=cpu --compile=False
+```
+
+<Note>
+Disable compilation on CPU as it's not well supported. Expect slower performance compared to GPU.
+</Note>
+
+### Apple Silicon (M1/M2/M3)
+
+```bash
+python sample.py --device=mps
+```
+
+Metal Performance Shaders (MPS) leverages the on-chip GPU for 2-3x speedup over CPU:
+
+<Tip>
+On Apple Silicon Macbooks with recent PyTorch, always use `--device=mps` for significantly faster inference.
+</Tip>
+
+## Mixed Precision
+
+### Automatic Precision Selection
+
+```python sample.py:21-32
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
+exec(open('configurator.py').read()) # overrides from command line or config file
+# -----------------------------------------------------------------------------
+
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+```
+
+### Precision Options
+
+<ParamField path="dtype" type="string" default="auto">
+  Computation precision:
+  - `bfloat16` (recommended for A100, H100) - better numerical stability
+  - `float16` (fallback) - wider hardware support
+  - `float32` - full precision, slowest but most accurate
+</ParamField>
+
+### Specifying Precision
+
+<CodeGroup>
+
+```bash BFloat16 (A100/H100)
+python sample.py --dtype=bfloat16
+```
+
+```bash Float16 (Older GPUs)
+python sample.py --dtype=float16
+```
+
+```bash Full Precision
+python sample.py --dtype=float32
+```
+
+</CodeGroup>
+
+### TensorFloat32 (TF32)
+
+Automatic TF32 acceleration for Ampere+ GPUs:
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+```
+
+This is enabled by default and provides free speedup on A100/A6000/RTX 30/40 series GPUs.
+
+## Benchmarking
+
+Use `bench.py` for systematic performance measurement:
+
+```python bench.py:1-118
+"""
+A much shorter version of train.py for benchmarking
+"""
+import os
+from contextlib import nullcontext
+import numpy as np
+import time
+import torch
+from model import GPTConfig, GPT
+
+# -----------------------------------------------------------------------------
+batch_size = 12
+block_size = 1024
+bias = False
+real_data = True
+seed = 1337
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
+compile = True # use PyTorch 2.0 to compile the model to be faster
+```
+
+### Running Benchmarks
+
+```bash
+python bench.py
+```
+
+The script performs:
+1. 10 warmup iterations
+2. 20 benchmark iterations
+3. Reports time per iteration and MFU (Model FLOPs Utilization)
+
+### Model FLOPs Utilization (MFU)
+
+The benchmark reports MFU, which measures efficiency relative to peak hardware performance:
+
+```python model.py:289-303
+def estimate_mfu(self, fwdbwd_per_iter, dt):
+    """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+    # first estimate the number of flops we do per iteration.
+    # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
+    N = self.get_num_params()
+    cfg = self.config
+    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+    flops_per_token = 6*N + 12*L*H*Q*T
+    flops_per_fwdbwd = flops_per_token * T
+    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+    # express our flops throughput as ratio of A100 bfloat16 peak flops
+    flops_achieved = flops_per_iter * (1.0/dt) # per second
+    flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+    mfu = flops_achieved / flops_promised
+    return mfu
+```
+
+### Example Output
+
+```
+time per iteration: 135.42ms, MFU: 45.67%
+```
+
+Higher MFU indicates better hardware utilization.
+
+## Performance Checklist
+
+<Steps>
+  <Step title="Use PyTorch >= 2.0">
+    Enables Flash Attention and torch.compile() for major speedups
+  </Step>
+
+  <Step title="Enable torch.compile()">
+    Add `--compile=True` for ~2x faster inference (GPU only)
+  </Step>
+
+  <Step title="Select Proper Device">
+    - CUDA GPU: `--device=cuda`
+    - Apple Silicon: `--device=mps`
+    - Avoid CPU when possible
+  </Step>
+
+  <Step title="Use Mixed Precision">
+    Let the script auto-select `bfloat16` or `float16`, or specify `--dtype=bfloat16` on supported hardware
+  </Step>
+
+  <Step title="Benchmark Your Setup">
+    Run `python bench.py` to measure actual performance and MFU
+  </Step>
+</Steps>
+
+<Tip>
+For maximum performance: PyTorch 2.0+ with `torch.compile()`, bfloat16 precision on A100 GPU. This configuration can achieve 40-50% MFU.
+</Tip>

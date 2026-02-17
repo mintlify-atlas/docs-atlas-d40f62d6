@@ -1,0 +1,219 @@
+---
+title: Installation
+description: Set up nanoGPT and install all required dependencies
+---
+
+# Installation
+
+Get nanoGPT up and running on your machine. The setup is straightforward and works on Linux, macOS, and Windows (with some caveats).
+
+## Prerequisites
+
+<Note>
+nanoGPT requires Python 3.8+ and works best with a CUDA-capable GPU, though CPU and Apple Silicon are also supported.
+</Note>
+
+## Quick Install
+
+Install all dependencies with a single pip command:
+
+```bash
+pip install torch numpy transformers datasets tiktoken wandb tqdm
+```
+
+## Dependencies
+
+<Steps>
+  <Step title="Install PyTorch">
+    PyTorch is the core deep learning framework.
+    
+    ```bash
+    pip install torch
+    ```
+    
+    <Tip>
+    For optimal performance, install the CUDA version from [pytorch.org](https://pytorch.org/get-started/locally/). For Apple Silicon Macs, the default installation includes MPS (Metal Performance Shaders) support.
+    </Tip>
+  </Step>
+  
+  <Step title="Install NumPy">
+    Required for data processing and array operations.
+    
+    ```bash
+    pip install numpy
+    ```
+  </Step>
+  
+  <Step title="Install Hugging Face Libraries">
+    Transformers and datasets libraries for model loading and data preprocessing.
+    
+    ```bash
+    pip install transformers datasets
+    ```
+    
+    - `transformers` - Load GPT-2 pretrained checkpoints from OpenAI
+    - `datasets` - Download and preprocess datasets like OpenWebText
+  </Step>
+  
+  <Step title="Install Tiktoken">
+    OpenAI's fast BPE tokenizer.
+    
+    ```bash
+    pip install tiktoken
+    ```
+  </Step>
+  
+  <Step title="Install Optional Dependencies">
+    For logging and progress tracking.
+    
+    ```bash
+    pip install wandb tqdm
+    ```
+    
+    - `wandb` - Optional experiment tracking and logging
+    - `tqdm` - Progress bars during training
+  </Step>
+</Steps>
+
+## Hardware Requirements
+
+### GPU (Recommended)
+
+For best performance, use an NVIDIA GPU with CUDA support:
+
+- **Quick experiments**: GTX 1060+ (6GB VRAM) or better
+- **Character-level training**: RTX 2060+ (8GB VRAM) or better  
+- **GPT-2 reproduction**: 8× A100 40GB GPUs
+- **Finetuning**: Single RTX 3090 or A100 sufficient
+
+<Note>
+nanoGPT uses PyTorch 2.0's `torch.compile()` by default, which provides significant speedups (e.g., from ~250ms/iter to ~135ms/iter).
+</Note>
+
+### CPU
+
+You can run nanoGPT on CPU, but training will be significantly slower:
+
+- Suitable for small experiments and learning
+- Character-level Shakespeare model trains in ~3 minutes on modern CPUs
+- Must disable torch.compile with `--compile=False`
+
+### Apple Silicon (M1/M2/M3)
+
+Apple Silicon Macs have accelerated training via Metal Performance Shaders:
+
+- 2-3× faster than CPU-only training
+- Use `--device=mps` flag when training
+- Still requires `--compile=False` (torch.compile not yet supported on MPS)
+
+<Tip>
+On Apple Silicon, make sure you have a recent PyTorch version that supports MPS. Install the nightly build for best results:
+```bash
+pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+```
+</Tip>
+
+## Clone the Repository
+
+Get the nanoGPT source code:
+
+```bash
+git clone https://github.com/karpathy/nanoGPT.git
+cd nanoGPT
+```
+
+## Verify Installation
+
+<Steps>
+  <Step title="Check PyTorch Installation">
+    Verify PyTorch is installed and can detect your GPU:
+    
+    ```python
+    import torch
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"CUDA version: {torch.version.cuda if torch.cuda.is_available() else 'N/A'}")
+    ```
+    
+    Expected output (GPU):
+    ```
+    PyTorch version: 2.0.0+cu118
+    CUDA available: True
+    CUDA version: 11.8
+    ```
+  </Step>
+  
+  <Step title="Test Model Import">
+    Verify you can import the GPT model:
+    
+    ```python
+    from model import GPT, GPTConfig
+    
+    # Create a small test model
+    config = GPTConfig(block_size=64, n_layer=2, n_head=2, n_embd=128)
+    model = GPT(config)
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    ```
+  </Step>
+  
+  <Step title="Run Quick Test">
+    Test the training script with minimal settings:
+    
+    ```bash
+    python train.py --help
+    ```
+    
+    This should display all available command-line options without errors.
+  </Step>
+</Steps>
+
+## Platform-Specific Notes
+
+### Windows
+
+<Warning>
+PyTorch 2.0's `torch.compile()` is not yet fully supported on Windows. Add `--compile=False` to all training commands.
+</Warning>
+
+### Linux
+
+No special configuration needed. This is the recommended platform for nanoGPT.
+
+### macOS
+
+For Apple Silicon (M1/M2/M3):
+- Use `--device=mps` for GPU acceleration
+- Use `--compile=False` (compile not supported on MPS yet)
+- Install bleeding edge PyTorch nightly for best performance
+
+For Intel Macs:
+- Use `--device=cpu`
+- Use `--compile=False`
+
+## Troubleshooting
+
+### "torch.compile not available" Error
+
+If you see errors related to `torch.compile`, disable it:
+
+```bash
+python train.py --compile=False
+```
+
+### Out of Memory Errors
+
+If you run out of GPU memory:
+
+1. Reduce batch size: `--batch_size=8`
+2. Reduce model size: `--n_layer=4 --n_embd=256`
+3. Reduce context length: `--block_size=128`
+
+### Slow Training
+
+<Tip>
+Make sure you're using PyTorch 2.0+ with torch.compile enabled (default) and that you have the CUDA version of PyTorch installed for GPU training.
+</Tip>
+
+## Next Steps
+
+Now that you have nanoGPT installed, head over to the [Quickstart Guide](/quickstart) to train your first model!

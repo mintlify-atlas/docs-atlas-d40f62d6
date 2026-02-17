@@ -1,0 +1,460 @@
+---
+title: 'Data Preparation'
+description: 'Preparing datasets for training with nanoGPT'
+---
+
+## Overview
+
+nanoGPT expects training data in a specific binary format: `train.bin` and `val.bin` files containing token IDs stored as `np.uint16` arrays. This format enables efficient memory-mapped data loading during training.
+
+## Data Format
+
+Training data consists of:
+- **train.bin**: Binary file with training token IDs (uint16)
+- **val.bin**: Binary file with validation token IDs (uint16)
+- **meta.pkl** (optional): Metadata including vocabulary size and encoder/decoder functions
+
+<Info>
+Using `uint16` dtype limits vocabulary size to 65,536 tokens, which is sufficient for GPT-2 BPE (50,257 tokens) and small character-level vocabularies.
+</Info>
+
+## Memory-Mapped Data Loading
+
+The training script uses memory-mapped files for efficient data loading:
+
+```python train.py:114-131
+# poor man's data loader
+data_dir = os.path.join('data', dataset)
+def get_batch(split):
+    # We recreate np.memmap every batch to avoid a memory leak, as per
+    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+    if split == 'train':
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+    else:
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
+```
+
+<Note>
+Memory mapping allows working with datasets larger than RAM by loading only the required portions into memory.
+</Note>
+
+## Tokenization Approaches
+
+nanoGPT supports two main tokenization strategies:
+
+### 1. Character-Level Tokenization
+
+Simple character-to-integer mapping for small vocabularies.
+
+### 2. BPE Tokenization
+
+Using GPT-2's byte-pair encoding via tiktoken for larger vocabularies.
+
+## Prepare Scripts
+
+Each dataset in `data/` has a `prepare.py` script that generates the binary files.
+
+## Character-Level Example: Shakespeare
+
+The Shakespeare character-level dataset demonstrates the simplest tokenization approach:
+
+```python data/shakespeare_char/prepare.py
+import os
+import pickle
+import requests
+import numpy as np
+
+# download the tiny shakespeare dataset
+input_file_path = os.path.join(os.path.dirname(__file__), 'input.txt')
+if not os.path.exists(input_file_path):
+    data_url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
+    with open(input_file_path, 'w') as f:
+        f.write(requests.get(data_url).text)
+
+with open(input_file_path, 'r') as f:
+    data = f.read()
+print(f"length of dataset in characters: {len(data):,}")
+
+# get all the unique characters that occur in this text
+chars = sorted(list(set(data)))
+vocab_size = len(chars)
+print("all the unique characters:", ''.join(chars))
+print(f"vocab size: {vocab_size:,}")
+
+# create a mapping from characters to integers
+stoi = { ch:i for i,ch in enumerate(chars) }
+itos = { i:ch for i,ch in enumerate(chars) }
+def encode(s):
+    return [stoi[c] for c in s] # encoder: take a string, output a list of integers
+def decode(l):
+    return ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+
+# create the train and test splits
+n = len(data)
+train_data = data[:int(n*0.9)]
+val_data = data[int(n*0.9):]
+
+# encode both to integers
+train_ids = encode(train_data)
+val_ids = encode(val_data)
+print(f"train has {len(train_ids):,} tokens")
+print(f"val has {len(val_ids):,} tokens")
+
+# export to bin files
+train_ids = np.array(train_ids, dtype=np.uint16)
+val_ids = np.array(val_ids, dtype=np.uint16)
+train_ids.tofile(os.path.join(os.path.dirname(__file__), 'train.bin'))
+val_ids.tofile(os.path.join(os.path.dirname(__file__), 'val.bin'))
+
+# save the meta information as well, to help us encode/decode later
+meta = {
+    'vocab_size': vocab_size,
+    'itos': itos,
+    'stoi': stoi,
+}
+with open(os.path.join(os.path.dirname(__file__), 'meta.pkl'), 'wb') as f:
+    pickle.dump(meta, f)
+```
+
+<Accordion title="Character-Level Preparation Steps">
+1. **Download**: Fetch the Shakespeare text from the web
+2. **Extract vocabulary**: Get all unique characters (vocab_size = 65)
+3. **Create mappings**: Build character-to-int (stoi) and int-to-character (itos) dictionaries
+4. **Split data**: Use 90% for training, 10% for validation
+5. **Encode**: Convert characters to integers using the mapping
+6. **Save**: Write binary files and metadata
+
+**Output**:
+- train.bin: 1,003,854 tokens
+- val.bin: 111,540 tokens
+- vocab_size: 65 characters
+</Accordion>
+
+## BPE Example: Shakespeare with tiktoken
+
+The same Shakespeare dataset using GPT-2 BPE tokenization:
+
+```python data/shakespeare/prepare.py
+import os
+import requests
+import tiktoken
+import numpy as np
+
+# download the tiny shakespeare dataset
+input_file_path = os.path.join(os.path.dirname(__file__), 'input.txt')
+if not os.path.exists(input_file_path):
+    data_url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
+    with open(input_file_path, 'w', encoding='utf-8') as f:
+        f.write(requests.get(data_url).text)
+
+with open(input_file_path, 'r', encoding='utf-8') as f:
+    data = f.read()
+n = len(data)
+train_data = data[:int(n*0.9)]
+val_data = data[int(n*0.9):]
+
+# encode with tiktoken gpt2 bpe
+enc = tiktoken.get_encoding("gpt2")
+train_ids = enc.encode_ordinary(train_data)
+val_ids = enc.encode_ordinary(val_data)
+print(f"train has {len(train_ids):,} tokens")
+print(f"val has {len(val_ids):,} tokens")
+
+# export to bin files
+train_ids = np.array(train_ids, dtype=np.uint16)
+val_ids = np.array(val_ids, dtype=np.uint16)
+train_ids.tofile(os.path.join(os.path.dirname(__file__), 'train.bin'))
+val_ids.tofile(os.path.join(os.path.dirname(__file__), 'val.bin'))
+
+# train.bin has 301,966 tokens
+# val.bin has 36,059 tokens
+```
+
+<Accordion title="BPE vs Character-Level">
+**Character-level** (shakespeare_char):
+- Vocabulary: 65 tokens
+- Train: 1,003,854 tokens
+- Simpler, good for small datasets
+
+**BPE** (shakespeare):
+- Vocabulary: 50,257 tokens (GPT-2)
+- Train: 301,966 tokens (~3x fewer)
+- More efficient representation
+- Compatible with pre-trained GPT-2 models
+</Accordion>
+
+## Large-Scale Example: OpenWebText
+
+Preparing the full OpenWebText dataset (8M documents, ~9B tokens):
+
+```python data/openwebtext/prepare.py
+import os
+from tqdm import tqdm
+import numpy as np
+import tiktoken
+from datasets import load_dataset # huggingface datasets
+
+# number of workers in .map() call
+# good number to use is ~order number of cpu cores // 2
+num_proc = 8
+
+# number of workers in load_dataset() call
+# best number might be different from num_proc above as it also depends on NW speed.
+num_proc_load_dataset = num_proc
+
+enc = tiktoken.get_encoding("gpt2")
+
+if __name__ == '__main__':
+    # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
+    dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset)
+
+    # owt by default only contains the 'train' split, so create a test split
+    split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
+    split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
+
+    # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
+    def process(example):
+        ids = enc.encode_ordinary(example['text']) # encode_ordinary ignores any special tokens
+        ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
+        out = {'ids': ids, 'len': len(ids)}
+        return out
+
+    # tokenize the dataset
+    tokenized = split_dataset.map(
+        process,
+        remove_columns=['text'],
+        desc="tokenizing the splits",
+        num_proc=num_proc,
+    )
+
+    # concatenate all the ids in each dataset into one large file we can use for training
+    for split, dset in tokenized.items():
+        arr_len = np.sum(dset['len'], dtype=np.uint64)
+        filename = os.path.join(os.path.dirname(__file__), f'{split}.bin')
+        dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
+        arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
+        total_batches = 1024
+
+        idx = 0
+        for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
+            # Batch together samples for faster write
+            batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
+            arr_batch = np.concatenate(batch['ids'])
+            # Write into mmap
+            arr[idx : idx + len(arr_batch)] = arr_batch
+            idx += len(arr_batch)
+        arr.flush()
+
+    # train.bin is ~17GB, val.bin ~8.5MB
+    # train has ~9B tokens (9,035,582,198)
+    # val has ~4M tokens (4,434,897)
+```
+
+<Accordion title="OpenWebText Preparation Details">
+1. **Load dataset**: Uses HuggingFace datasets library (54GB cached)
+2. **Create splits**: 99.95% train, 0.05% validation
+3. **Tokenize**: Apply GPT-2 BPE encoding with multiprocessing
+4. **Add EOT tokens**: Append end-of-text token to each document
+5. **Concatenate**: Merge all tokens into single binary files
+6. **Memory-map write**: Efficiently write large arrays
+
+**Output**:
+- train.bin: ~17GB, 9 billion tokens
+- val.bin: ~8.5MB, 4 million tokens
+- 8 million documents processed
+</Accordion>
+
+<Tip>
+Use multiple CPU cores (`num_proc=8`) to speed up tokenization for large datasets.
+</Tip>
+
+## Creating Custom Datasets
+
+To prepare your own dataset:
+
+### Step 1: Choose Tokenization
+
+<Tabs>
+  <Tab title="Character-Level">
+    Best for:
+    - Small datasets
+    - Non-English text
+    - When you want full control
+    
+    ```python
+    # Create character vocabulary
+    chars = sorted(list(set(text)))
+    stoi = {ch: i for i, ch in enumerate(chars)}
+    itos = {i: ch for i, ch in enumerate(chars)}
+    
+    # Encode
+    tokens = [stoi[c] for c in text]
+    ```
+  </Tab>
+  
+  <Tab title="BPE (tiktoken)">
+    Best for:
+    - Large datasets
+    - English text
+    - Transfer learning from GPT-2
+    
+    ```python
+    import tiktoken
+    
+    enc = tiktoken.get_encoding("gpt2")
+    tokens = enc.encode_ordinary(text)
+    ```
+  </Tab>
+</Tabs>
+
+### Step 2: Create Train/Val Split
+
+```python
+# 90/10 split
+n = len(data)
+train_data = data[:int(n * 0.9)]
+val_data = data[int(n * 0.9):]
+```
+
+### Step 3: Encode and Save
+
+```python
+import numpy as np
+
+# Encode
+train_ids = encode(train_data)  # Your encoding function
+val_ids = encode(val_data)
+
+# Convert to numpy arrays
+train_ids = np.array(train_ids, dtype=np.uint16)
+val_ids = np.array(val_ids, dtype=np.uint16)
+
+# Save binary files
+train_ids.tofile('data/my_dataset/train.bin')
+val_ids.tofile('data/my_dataset/val.bin')
+```
+
+### Step 4: Save Metadata (Optional)
+
+```python
+import pickle
+
+meta = {
+    'vocab_size': vocab_size,
+    'itos': itos,  # int to string mapping
+    'stoi': stoi,  # string to int mapping
+}
+with open('data/my_dataset/meta.pkl', 'wb') as f:
+    pickle.dump(meta, f)
+```
+
+### Step 5: Train
+
+```bash
+python train.py --dataset=my_dataset
+```
+
+## Vocabulary Size Handling
+
+The training script automatically detects vocabulary size from `meta.pkl`:
+
+```python train.py:137-144
+# attempt to derive vocab_size from the dataset
+meta_path = os.path.join(data_dir, 'meta.pkl')
+meta_vocab_size = None
+if os.path.exists(meta_path):
+    with open(meta_path, 'rb') as f:
+        meta = pickle.load(f)
+    meta_vocab_size = meta['vocab_size']
+    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+```
+
+If no `meta.pkl` exists, it defaults to GPT-2's vocabulary:
+
+```python train.py:152-155
+if meta_vocab_size is None:
+    print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+```
+
+<Note>
+The default vocab_size of 50304 is GPT-2's 50257 rounded up to the nearest multiple of 64 for efficiency.
+</Note>
+
+## Data Loading Best Practices
+
+<Accordion title="Memory Efficiency">
+- Use `np.memmap` for datasets larger than RAM
+- Recreate memmap each batch to avoid memory leaks
+- Use `uint16` dtype when vocab_size < 65536
+</Accordion>
+
+<Accordion title="Performance">
+- Use multiple workers for tokenization (`num_proc=8`)
+- Pin memory for faster GPU transfer
+- Use async data transfer with `non_blocking=True`
+</Accordion>
+
+<Accordion title="Data Quality">
+- Clean your text data before tokenization
+- Remove or handle special characters
+- Ensure consistent encoding (UTF-8)
+- Add end-of-text tokens between documents
+</Accordion>
+
+## Example Dataset Structure
+
+```
+data/
+├── shakespeare_char/
+│   ├── prepare.py
+│   ├── input.txt
+│   ├── train.bin
+│   ├── val.bin
+│   └── meta.pkl
+├── shakespeare/
+│   ├── prepare.py
+│   ├── input.txt
+│   ├── train.bin
+│   └── val.bin
+└── openwebtext/
+    ├── prepare.py
+    ├── train.bin
+    └── val.bin
+```
+
+Each dataset directory contains:
+- **prepare.py**: Script to generate binary files
+- **input.txt** (optional): Raw text data
+- **train.bin**: Training data tokens
+- **val.bin**: Validation data tokens
+- **meta.pkl** (optional): Vocabulary metadata
+
+## Running Preparation Scripts
+
+```bash
+# Character-level Shakespeare
+cd data/shakespeare_char
+python prepare.py
+
+# BPE Shakespeare
+cd data/shakespeare
+python prepare.py
+
+# OpenWebText (requires ~54GB disk space)
+cd data/openwebtext
+python prepare.py
+```
+
+<Tip>
+Run prepare.py scripts from their own directory so relative paths work correctly.
+</Tip>

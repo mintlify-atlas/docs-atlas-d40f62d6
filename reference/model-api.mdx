@@ -1,0 +1,354 @@
+---
+title: Model API
+description: Complete API reference for the GPT model implementation
+---
+
+## GPT Class
+
+The main GPT language model implementation.
+
+### Constructor
+
+```python
+GPT(config: GPTConfig)
+```
+
+Initializes a GPT model with the specified configuration.
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object specifying model architecture and hyperparameters
+</ParamField>
+
+### Methods
+
+#### forward
+
+```python
+def forward(idx, targets=None) -> tuple[Tensor, Tensor | None]
+```
+
+Forward pass through the model.
+
+<ParamField path="idx" type="torch.Tensor" required>
+  Input token indices of shape `(batch_size, sequence_length)`
+</ParamField>
+
+<ParamField path="targets" type="torch.Tensor">
+  Target token indices for computing loss. If provided, loss is computed and returned.
+</ParamField>
+
+<ResponseField name="logits" type="torch.Tensor">
+  Output logits. Shape `(batch_size, sequence_length, vocab_size)` if targets provided, otherwise `(batch_size, 1, vocab_size)` for inference optimization.
+</ResponseField>
+
+<ResponseField name="loss" type="torch.Tensor | None">
+  Cross-entropy loss if targets provided, otherwise None
+</ResponseField>
+
+#### generate
+
+```python
+@torch.no_grad()
+def generate(idx, max_new_tokens, temperature=1.0, top_k=None) -> Tensor
+```
+
+Generate new tokens autoregressively from a conditioning sequence.
+
+<ParamField path="idx" type="torch.Tensor" required>
+  Conditioning sequence of token indices, shape `(batch_size, sequence_length)`
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" required>
+  Number of new tokens to generate
+</ParamField>
+
+<ParamField path="temperature" type="float" default="1.0">
+  Sampling temperature. Values < 1.0 make output more deterministic, > 1.0 more random
+</ParamField>
+
+<ParamField path="top_k" type="int | None">
+  If specified, only sample from the top k most likely tokens
+</ParamField>
+
+<ResponseField name="return" type="torch.Tensor">
+  Generated sequence including the conditioning tokens, shape `(batch_size, sequence_length + max_new_tokens)`
+</ResponseField>
+
+#### from_pretrained
+
+```python
+@classmethod
+def from_pretrained(cls, model_type, override_args=None) -> GPT
+```
+
+Load pretrained GPT-2 weights from HuggingFace transformers.
+
+<ParamField path="model_type" type="str" required>
+  One of: `'gpt2'` (124M), `'gpt2-medium'` (350M), `'gpt2-large'` (774M), `'gpt2-xl'` (1558M)
+</ParamField>
+
+<ParamField path="override_args" type="dict">
+  Optional dictionary to override config parameters. Only `'dropout'` can be overridden.
+</ParamField>
+
+<ResponseField name="return" type="GPT">
+  GPT model with pretrained weights loaded
+</ResponseField>
+
+#### configure_optimizers
+
+```python
+def configure_optimizers(weight_decay, learning_rate, betas, device_type) -> torch.optim.AdamW
+```
+
+Create an AdamW optimizer with weight decay applied only to 2D parameters.
+
+<ParamField path="weight_decay" type="float" required>
+  Weight decay coefficient for regularization
+</ParamField>
+
+<ParamField path="learning_rate" type="float" required>
+  Learning rate for the optimizer
+</ParamField>
+
+<ParamField path="betas" type="tuple[float, float]" required>
+  Adam beta parameters (beta1, beta2)
+</ParamField>
+
+<ParamField path="device_type" type="str" required>
+  Device type ('cuda' or 'cpu') to determine if fused AdamW can be used
+</ParamField>
+
+<ResponseField name="return" type="torch.optim.AdamW">
+  Configured AdamW optimizer with parameter groups for weight decay
+</ResponseField>
+
+#### estimate_mfu
+
+```python
+def estimate_mfu(fwdbwd_per_iter, dt) -> float
+```
+
+Estimate model FLOPS utilization (MFU) in units of A100 bfloat16 peak FLOPS.
+
+<ParamField path="fwdbwd_per_iter" type="int" required>
+  Number of forward-backward passes per iteration (typically batch_size * gradient_accumulation_steps)
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Time taken for the iteration in seconds
+</ParamField>
+
+<ResponseField name="return" type="float">
+  MFU as a ratio (0.0 to 1.0) of A100 peak FLOPS (312 TFLOPS)
+</ResponseField>
+
+#### crop_block_size
+
+```python
+def crop_block_size(block_size) -> None
+```
+
+Reduce the model's block size via model surgery. Useful for using pretrained models with smaller context.
+
+<ParamField path="block_size" type="int" required>
+  New block size (must be <= current block_size)
+</ParamField>
+
+#### get_num_params
+
+```python
+def get_num_params(non_embedding=True) -> int
+```
+
+Return the number of parameters in the model.
+
+<ParamField path="non_embedding" type="bool" default="True">
+  If True, excludes position embeddings from the count (default behavior)
+</ParamField>
+
+<ResponseField name="return" type="int">
+  Total number of parameters
+</ResponseField>
+
+---
+
+## GPTConfig
+
+Configuration dataclass for the GPT model architecture.
+
+```python
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True
+```
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length / context window size
+</ParamField>
+
+<ParamField path="vocab_size" type="int" default="50304">
+  Vocabulary size. Default is GPT-2's 50257 padded to nearest multiple of 64 for efficiency
+</ParamField>
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer blocks
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout probability. 0.0 recommended for pretraining, 0.1+ for finetuning
+</ParamField>
+
+<ParamField path="bias" type="bool" default="True">
+  Whether to use bias in Linear and LayerNorm layers. False is slightly better and faster
+</ParamField>
+
+---
+
+## Component Classes
+
+### Block
+
+A single transformer block with attention and MLP.
+
+```python
+class Block(nn.Module):
+    def __init__(self, config: GPTConfig)
+    def forward(self, x: Tensor) -> Tensor
+```
+
+Contains:
+- Pre-norm LayerNorm (`ln_1`)
+- Causal self-attention (`attn`)
+- Pre-norm LayerNorm (`ln_2`)
+- MLP feed-forward (`mlp`)
+
+### CausalSelfAttention
+
+Multi-head causal self-attention with optional Flash Attention.
+
+```python
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config: GPTConfig)
+    def forward(self, x: Tensor) -> Tensor
+```
+
+<Accordion title="Features">
+  - Automatically uses Flash Attention if PyTorch >= 2.0
+  - Falls back to manual attention implementation with causal masking
+  - Batched key, query, value projections for efficiency
+  - Attention and residual dropout
+</Accordion>
+
+### MLP
+
+Position-wise feed-forward network.
+
+```python
+class MLP(nn.Module):
+    def __init__(self, config: GPTConfig)
+    def forward(self, x: Tensor) -> Tensor
+```
+
+Two-layer MLP with GELU activation:
+- Expansion: `n_embd` → `4 * n_embd`
+- Projection: `4 * n_embd` → `n_embd`
+- Dropout applied after projection
+
+### LayerNorm
+
+LayerNorm with optional bias parameter.
+
+```python
+class LayerNorm(nn.Module):
+    def __init__(self, ndim: int, bias: bool)
+    def forward(self, input: Tensor) -> Tensor
+```
+
+Simple wrapper around `F.layer_norm` that supports `bias=False` (PyTorch's default LayerNorm always uses bias).
+
+---
+
+## Example Usage
+
+### Creating a Model from Scratch
+
+```python
+from model import GPT, GPTConfig
+
+# Create a small model
+config = GPTConfig(
+    block_size=256,
+    vocab_size=50304,
+    n_layer=6,
+    n_head=6,
+    n_embd=384,
+    dropout=0.2,
+    bias=False
+)
+model = GPT(config)
+```
+
+### Loading Pretrained GPT-2
+
+```python
+from model import GPT
+
+# Load GPT-2 124M
+model = GPT.from_pretrained('gpt2', override_args={'dropout': 0.1})
+```
+
+### Generating Text
+
+```python
+import torch
+from model import GPT
+
+model = GPT.from_pretrained('gpt2')
+model.eval()
+
+# Start tokens (e.g., from a tokenizer)
+idx = torch.tensor([[1, 2, 3]], dtype=torch.long)  # shape (1, 3)
+
+# Generate 100 new tokens
+output = model.generate(idx, max_new_tokens=100, temperature=0.8, top_k=200)
+```
+
+### Training Setup
+
+```python
+from model import GPT, GPTConfig
+import torch
+
+config = GPTConfig()
+model = GPT(config).to('cuda')
+
+# Configure optimizer
+optimizer = model.configure_optimizers(
+    weight_decay=0.1,
+    learning_rate=6e-4,
+    betas=(0.9, 0.95),
+    device_type='cuda'
+)
+
+# Training loop
+for x, y in dataloader:
+    logits, loss = model(x, y)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+```

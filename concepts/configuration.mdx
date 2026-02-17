@@ -1,0 +1,432 @@
+---
+title: 'Configuration System'
+description: 'Understanding nanoGPT configuration and command-line overrides'
+---
+
+## Overview
+
+nanoGPT uses a simple but powerful configuration system that allows you to:
+- Define configuration files in Python
+- Override parameters via command line
+- Chain multiple configuration sources
+
+## The Configurator
+
+The configuration system is implemented in `configurator.py` and works by overriding Python globals:
+
+```python configurator.py:1-48
+"""
+Poor Man's Configurator. Probably a terrible idea. Example usage:
+$ python train.py config/override_file.py --batch_size=32
+this will first run config/override_file.py, then override batch_size to 32
+
+The code in this file will be run as follows from e.g. train.py:
+>>> exec(open('configurator.py').read())
+
+So it's not a Python module, it's just shuttling this code away from train.py
+The code in this script then overrides the globals()
+"""
+
+import sys
+from ast import literal_eval
+
+for arg in sys.argv[1:]:
+    if '=' not in arg:
+        # assume it's the name of a config file
+        assert not arg.startswith('--')
+        config_file = arg
+        print(f"Overriding config with {config_file}:")
+        with open(config_file) as f:
+            print(f.read())
+        exec(open(config_file).read())
+    else:
+        # assume it's a --key=value argument
+        assert arg.startswith('--')
+        key, val = arg.split('=')
+        key = key[2:]
+        if key in globals():
+            try:
+                # attempt to eval it it (e.g. if bool, number, or etc)
+                attempt = literal_eval(val)
+            except (SyntaxError, ValueError):
+                # if that goes wrong, just use the string
+                attempt = val
+            # ensure the types match ok
+            assert type(attempt) == type(globals()[key])
+            # cross fingers
+            print(f"Overriding: {key} = {attempt}")
+            globals()[key] = attempt
+        else:
+            raise ValueError(f"Unknown config key: {key}")
+```
+
+<Note>
+The configurator enforces type safety: you cannot override an integer parameter with a string, for example.
+</Note>
+
+## Default Configuration
+
+The `train.py` file defines comprehensive default values:
+
+```python train.py:32-75
+# -----------------------------------------------------------------------------
+# default config values designed to train a gpt2 (124M) on OpenWebText
+# I/O
+out_dir = 'out'
+eval_interval = 2000
+log_interval = 1
+eval_iters = 200
+eval_only = False # if True, script exits right after the first eval
+always_save_checkpoint = True # if True, always save a checkpoint after each eval
+init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+# wandb logging
+wandb_log = False # disabled by default
+wandb_project = 'owt'
+wandb_run_name = 'gpt2' # 'run' + str(time.time())
+# data
+dataset = 'openwebtext'
+gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
+batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 1024
+# model
+n_layer = 12
+n_head = 12
+n_embd = 768
+dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
+bias = False # do we use bias inside LayerNorm and Linear layers?
+# adamw optimizer
+learning_rate = 6e-4 # max learning rate
+max_iters = 600000 # total number of training iterations
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+# learning rate decay settings
+decay_lr = True # whether to decay the learning rate
+warmup_iters = 2000 # how many steps to warm up for
+lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+# DDP settings
+backend = 'nccl' # 'nccl', 'gloo', etc.
+# system
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+compile = True # use PyTorch 2.0 to compile the model to be faster
+```
+
+## Configuration Categories
+
+<Accordion title="I/O Configuration">
+- **out_dir**: Directory for saving checkpoints
+- **eval_interval**: How often to evaluate (in iterations)
+- **log_interval**: How often to log training metrics
+- **eval_iters**: Number of iterations for evaluation
+- **eval_only**: If True, only run evaluation and exit
+- **always_save_checkpoint**: Save checkpoint after every evaluation
+</Accordion>
+
+<Accordion title="Model Configuration">
+- **n_layer**: Number of transformer layers
+- **n_head**: Number of attention heads
+- **n_embd**: Embedding dimension
+- **dropout**: Dropout rate
+- **bias**: Use bias in Linear and LayerNorm layers
+- **block_size**: Maximum sequence length (context window)
+</Accordion>
+
+<Accordion title="Training Configuration">
+- **learning_rate**: Maximum learning rate
+- **max_iters**: Total training iterations
+- **batch_size**: Micro-batch size
+- **gradient_accumulation_steps**: Simulate larger batches
+- **weight_decay**: AdamW weight decay
+- **beta1**, **beta2**: AdamW beta parameters
+- **grad_clip**: Gradient clipping threshold
+</Accordion>
+
+<Accordion title="Learning Rate Schedule">
+- **decay_lr**: Enable learning rate decay
+- **warmup_iters**: Linear warmup steps
+- **lr_decay_iters**: Cosine decay duration
+- **min_lr**: Minimum learning rate after decay
+</Accordion>
+
+## Configuration Files
+
+Configuration files are Python scripts that override default values. They live in the `config/` directory.
+
+### Example: Shakespeare Character-Level
+
+```python config/train_shakespeare_char.py
+# train a miniature character-level shakespeare model
+# good for debugging and playing on macbooks and such
+
+out_dir = 'out-shakespeare-char'
+eval_interval = 250 # keep frequent because we'll overfit
+eval_iters = 200
+log_interval = 10 # don't print too too often
+
+# we expect to overfit on this small dataset, so only save when val improves
+always_save_checkpoint = False
+
+wandb_log = False # override via command line if you like
+wandb_project = 'shakespeare-char'
+wandb_run_name = 'mini-gpt'
+
+dataset = 'shakespeare_char'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 256 # context of up to 256 previous characters
+
+# baby GPT model :)
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+max_iters = 5000
+lr_decay_iters = 5000 # make equal to max_iters usually
+min_lr = 1e-4 # learning_rate / 10 usually
+beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+
+warmup_iters = 100 # not super necessary potentially
+
+# on macbook also add
+# device = 'cpu'  # run on cpu only
+# compile = False # do not torch compile the model
+```
+
+<Info>
+This configuration trains a small 6-layer model on Shakespeare text, suitable for quick experiments on CPU.
+</Info>
+
+### Example: GPT-2 Training
+
+```python config/train_gpt2.py
+# config for training GPT-2 (124M) down to very nice loss of ~2.85 on 1 node of 8X A100 40GB
+# launch as the following (e.g. in a screen session) and wait ~5 days:
+# $ torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+
+wandb_log = True
+wandb_project = 'owt'
+wandb_run_name='gpt2-124M'
+
+# these make the total batch size be ~0.5M
+# 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
+batch_size = 12
+block_size = 1024
+gradient_accumulation_steps = 5 * 8
+
+# this makes total number of tokens be 300B
+max_iters = 600000
+lr_decay_iters = 600000
+
+# eval stuff
+eval_interval = 1000
+eval_iters = 200
+log_interval = 10
+
+# weight decay
+weight_decay = 1e-1
+```
+
+### Example: Fine-tuning
+
+```python config/finetune_shakespeare.py
+import time
+
+out_dir = 'out-shakespeare'
+eval_interval = 5
+eval_iters = 40
+wandb_log = False # feel free to turn on
+wandb_project = 'shakespeare'
+wandb_run_name = 'ft-' + str(time.time())
+
+dataset = 'shakespeare'
+init_from = 'gpt2-xl' # this is the largest GPT-2 model
+
+# only save checkpoints if the validation loss improves
+always_save_checkpoint = False
+
+# the number of examples per iter:
+# 1 batch_size * 32 grad_accum * 1024 tokens = 32,768 tokens/iter
+# shakespeare has 301,966 tokens, so 1 epoch ~= 9.2 iters
+batch_size = 1
+gradient_accumulation_steps = 32
+max_iters = 20
+
+# finetune at constant LR
+learning_rate = 3e-5
+decay_lr = False
+```
+
+<Tip>
+Fine-tuning typically uses a much smaller learning rate (3e-5) and disables learning rate decay.
+</Tip>
+
+## Command-Line Usage
+
+### Basic Usage
+
+Use a config file:
+```bash
+python train.py config/train_shakespeare_char.py
+```
+
+### Override Parameters
+
+Override specific parameters:
+```bash
+python train.py config/train_shakespeare_char.py --batch_size=32 --learning_rate=1e-4
+```
+
+### Multiple Overrides
+
+Chain multiple overrides:
+```bash
+python train.py config/train_gpt2.py --compile=False --device=cpu --max_iters=100
+```
+
+### Train from Scratch (No Config File)
+
+Use defaults with overrides:
+```bash
+python train.py --batch_size=32 --compile=False
+```
+
+## Common Configuration Patterns
+
+<Tabs>
+  <Tab title="Quick Debugging">
+    ```bash
+    python train.py \
+      --batch_size=4 \
+      --compile=False \
+      --eval_interval=10 \
+      --max_iters=100
+    ```
+    Small batch, no compilation, frequent evaluation for quick iteration.
+  </Tab>
+  
+  <Tab title="CPU Training">
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --device=cpu \
+      --compile=False \
+      --dtype=float32
+    ```
+    Configure for CPU-only training (useful on MacBooks).
+  </Tab>
+  
+  <Tab title="Single GPU">
+    ```bash
+    python train.py config/train_gpt2.py \
+      --gradient_accumulation_steps=40
+    ```
+    Adjust gradient accumulation for single GPU training.
+  </Tab>
+  
+  <Tab title="Distributed Training">
+    ```bash
+    torchrun --standalone --nproc_per_node=4 train.py config/train_gpt2.py
+    ```
+    Use torchrun for distributed data parallel training.
+  </Tab>
+</Tabs>
+
+## Init From Options
+
+The `init_from` parameter controls model initialization:
+
+<Accordion title="init_from='scratch'">
+Initialize a new model with random weights. The model architecture is defined by `n_layer`, `n_head`, `n_embd`, etc.
+
+```bash
+python train.py --init_from=scratch
+```
+</Accordion>
+
+<Accordion title="init_from='resume'">
+Resume training from a checkpoint in `out_dir`:
+
+```bash
+python train.py --init_from=resume --out_dir=out-shakespeare
+```
+</Accordion>
+
+<Accordion title="init_from='gpt2*'">
+Initialize from pre-trained GPT-2 weights:
+
+```bash
+python train.py --init_from=gpt2         # 124M params
+python train.py --init_from=gpt2-medium  # 350M params
+python train.py --init_from=gpt2-large   # 774M params
+python train.py --init_from=gpt2-xl      # 1558M params
+```
+</Accordion>
+
+## Weights & Biases Integration
+
+Enable W&B logging:
+
+```bash
+python train.py config/train_gpt2.py \
+  --wandb_log=True \
+  --wandb_project=my-project \
+  --wandb_run_name=experiment-1
+```
+
+<Note>
+Set `wandb_log=False` by default to avoid requiring W&B for quick experiments.
+</Note>
+
+## Distributed Training Configuration
+
+For multi-GPU training, use `torchrun`:
+
+```bash
+# Single node, 4 GPUs
+torchrun --standalone --nproc_per_node=4 train.py config/train_gpt2.py
+
+# Multi-node training
+# Master node:
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+  --master_addr=123.456.123.456 --master_port=1234 train.py
+
+# Worker node:
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
+  --master_addr=123.456.123.456 --master_port=1234 train.py
+```
+
+The training script automatically detects DDP mode and adjusts `gradient_accumulation_steps` accordingly:
+
+```python train.py:82-95
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+if ddp:
+    init_process_group(backend=backend)
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+    seed_offset = ddp_rank # each process gets a different seed
+    # world_size number of processes will be training simultaneously, so we can scale
+    # down the desired gradient accumulation iterations per process proportionally
+    assert gradient_accumulation_steps % ddp_world_size == 0
+    gradient_accumulation_steps //= ddp_world_size
+```
+
+## Creating Custom Configurations
+
+To create your own config file:
+
+1. Create a new Python file in `config/` directory
+2. Override only the parameters you want to change
+3. Add comments explaining the configuration
+4. Run with `python train.py config/your_config.py`
+
+<Tip>
+Start with an existing config file and modify it for your use case.
+</Tip>

@@ -1,0 +1,457 @@
+---
+title: Command-Line Reference
+description: Complete guide to using nanoGPT command-line tools
+---
+
+## train.py
+
+Main training script for GPT models.
+
+### Basic Usage
+
+```bash
+python train.py [config_file] [--param=value ...]
+```
+
+### Single GPU Training
+
+```bash
+# Train from scratch with default config
+python train.py
+
+# Override parameters
+python train.py --batch_size=32 --compile=False
+
+# Use config file
+python train.py config/train_shakespeare_char.py
+
+# Config file + overrides
+python train.py config/train_gpt2.py --batch_size=16
+```
+
+### Multi-GPU Training (DDP)
+
+Use `torchrun` for distributed data parallel training:
+
+<Tabs>
+  <Tab title="Single Node">
+    ```bash
+    # 4 GPUs on 1 node
+    torchrun --standalone --nproc_per_node=4 train.py
+
+    # 8 GPUs on 1 node with config
+    torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+    ```
+  </Tab>
+  
+  <Tab title="Multi-Node">
+    ```bash
+    # Master node (IP: 123.456.123.456)
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=0 \
+      --master_addr=123.456.123.456 \
+      --master_port=1234 \
+      train.py
+
+    # Worker node
+    torchrun \
+      --nproc_per_node=8 \
+      --nnodes=2 \
+      --node_rank=1 \
+      --master_addr=123.456.123.456 \
+      --master_port=1234 \
+      train.py
+    ```
+    
+    <Note>
+      If your cluster doesn't have Infiniband, prepend: `NCCL_IB_DISABLE=1`
+    </Note>
+  </Tab>
+</Tabs>
+
+### Common Training Scenarios
+
+<Accordion title="Train GPT-2 124M from Scratch">
+  ```bash
+  torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+  ```
+  
+  This will:
+  - Train a 124M parameter model
+  - Use OpenWebText dataset
+  - Take ~5 days on 8x A100 40GB
+  - Reach validation loss ~2.85
+</Accordion>
+
+<Accordion title="Finetune on Custom Dataset">
+  ```bash
+  python train.py \
+    --init_from=gpt2 \
+    --dataset=shakespeare_char \
+    --batch_size=64 \
+    --block_size=256 \
+    --dropout=0.2 \
+    --learning_rate=1e-3 \
+    --max_iters=5000
+  ```
+</Accordion>
+
+<Accordion title="Resume Training">
+  ```bash
+  python train.py --init_from=resume --out_dir=out
+  ```
+  
+  Loads checkpoint from `out/ckpt.pt` and continues training.
+</Accordion>
+
+<Accordion title="Evaluation Only">
+  ```bash
+  python train.py --init_from=resume --eval_only=True
+  ```
+  
+  Runs evaluation and exits (useful for testing checkpoints).
+</Accordion>
+
+### Key Parameters
+
+See the [Configuration](/reference/configuration) page for complete parameter reference.
+
+Most commonly overridden:
+
+```bash
+python train.py \
+  --batch_size=12 \
+  --block_size=1024 \
+  --n_layer=12 \
+  --n_head=12 \
+  --n_embd=768 \
+  --learning_rate=6e-4 \
+  --max_iters=600000 \
+  --device=cuda \
+  --compile=True
+```
+
+---
+
+## sample.py
+
+Generate text samples from a trained model.
+
+### Basic Usage
+
+```bash
+python sample.py [--param=value ...]
+```
+
+### Parameters
+
+<ParamField path="init_from" type="str" default="'resume'">
+  Model source:
+  - `'resume'`: Load from checkpoint in `out_dir`
+  - `'gpt2'`, `'gpt2-medium'`, `'gpt2-large'`, `'gpt2-xl'`: Use pretrained GPT-2
+</ParamField>
+
+<ParamField path="out_dir" type="str" default="'out'">
+  Directory containing `ckpt.pt` (only used if `init_from='resume'`)
+</ParamField>
+
+<ParamField path="start" type="str" default="'\n'">
+  Prompt to start generation. Can be:
+  - A string: `--start="Once upon a time"`
+  - A special token: `--start="<|endoftext|>"`
+  - A file: `--start="FILE:prompt.txt"`
+</ParamField>
+
+<ParamField path="num_samples" type="int" default="10">
+  Number of samples to generate
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" default="500">
+  Number of tokens to generate per sample
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0.8">
+  Sampling temperature. Lower = more deterministic, higher = more random
+</ParamField>
+
+<ParamField path="top_k" type="int" default="200">
+  Only sample from top k most likely tokens (set to None to disable)
+</ParamField>
+
+<ParamField path="seed" type="int" default="1337">
+  Random seed for reproducibility
+</ParamField>
+
+<ParamField path="device" type="str" default="'cuda'">
+  Device to run on: `'cpu'`, `'cuda'`, `'cuda:0'`, etc.
+</ParamField>
+
+<ParamField path="dtype" type="str" default="'bfloat16' or 'float16'">
+  Data type: `'float32'`, `'bfloat16'`, or `'float16'`
+</ParamField>
+
+<ParamField path="compile" type="bool" default="False">
+  Use `torch.compile()` for faster generation
+</ParamField>
+
+### Examples
+
+<Tabs>
+  <Tab title="From Checkpoint">
+    ```bash
+    # Generate from your trained model
+    python sample.py \
+      --init_from=resume \
+      --out_dir=out-shakespeare-char \
+      --start="ROMEO:" \
+      --num_samples=5 \
+      --max_new_tokens=200
+    ```
+  </Tab>
+  
+  <Tab title="From GPT-2">
+    ```bash
+    # Generate from pretrained GPT-2
+    python sample.py \
+      --init_from=gpt2-xl \
+      --start="In a shocking turn of events," \
+      --num_samples=3 \
+      --temperature=0.9 \
+      --top_k=300
+    ```
+  </Tab>
+  
+  <Tab title="From File">
+    ```bash
+    # Create prompt file
+    echo "Write a story about a robot:" > prompt.txt
+
+    # Generate
+    python sample.py \
+      --init_from=gpt2 \
+      --start="FILE:prompt.txt" \
+      --num_samples=1 \
+      --max_new_tokens=1000
+    ```
+  </Tab>
+  
+  <Tab title="Deterministic">
+    ```bash
+    # Greedy decoding (most likely tokens)
+    python sample.py \
+      --temperature=0.1 \
+      --top_k=1
+    ```
+  </Tab>
+</Tabs>
+
+### Output Format
+
+Generates samples separated by dashes:
+
+```
+Once upon a time, in a land far away...
+[generated text]
+---------------
+Once upon a time, in a land far away...
+[different generated text]
+---------------
+```
+
+---
+
+## bench.py
+
+Benchmark model performance and profile with PyTorch profiler.
+
+### Basic Usage
+
+```bash
+python bench.py [--param=value ...]
+```
+
+### Parameters
+
+<ParamField path="batch_size" type="int" default="12">
+  Batch size for benchmarking
+</ParamField>
+
+<ParamField path="block_size" type="int" default="1024">
+  Sequence length
+</ParamField>
+
+<ParamField path="bias" type="bool" default="False">
+  Use bias in Linear/LayerNorm layers
+</ParamField>
+
+<ParamField path="real_data" type="bool" default="True">
+  Use real data from OpenWebText. If False, uses random data
+</ParamField>
+
+<ParamField path="seed" type="int" default="1337">
+  Random seed
+</ParamField>
+
+<ParamField path="device" type="str" default="'cuda'">
+  Device to benchmark on
+</ParamField>
+
+<ParamField path="dtype" type="str" default="'bfloat16' or 'float16'">
+  Data type for computation
+</ParamField>
+
+<ParamField path="compile" type="bool" default="True">
+  Use `torch.compile()` (highly recommended for benchmarking)
+</ParamField>
+
+<ParamField path="profile" type="bool" default="False">
+  Enable PyTorch profiler (generates TensorBoard traces)
+</ParamField>
+
+### Examples
+
+<Tabs>
+  <Tab title="Simple Benchmark">
+    ```bash
+    # Basic performance test
+    python bench.py
+    ```
+    
+    Output:
+    ```
+    Compiling model...
+    0/10 loss: 10.9528
+    ...
+    time per iteration: 85.32ms, MFU: 42.15%
+    ```
+  </Tab>
+  
+  <Tab title="With Profiling">
+    ```bash
+    # Generate profiler traces
+    python bench.py --profile=True
+
+    # View in TensorBoard
+    tensorboard --logdir=bench_log
+    ```
+    
+    This profiles:
+    - 5 wait steps
+    - 5 warmup steps
+    - 5 active profiling steps
+    
+    Traces saved to `./bench_log/`
+  </Tab>
+  
+  <Tab title="Different Configs">
+    ```bash
+    # Small batch, longer sequences
+    python bench.py --batch_size=4 --block_size=2048
+
+    # Without compile (slower)
+    python bench.py --compile=False
+
+    # CPU benchmark
+    python bench.py --device=cpu --dtype=float32
+    ```
+  </Tab>
+  
+  <Tab title="Fake Data">
+    ```bash
+    # Benchmark without I/O overhead
+    python bench.py --real_data=False
+    ```
+    
+    Uses random tensors instead of loading data from disk.
+  </Tab>
+</Tabs>
+
+### Understanding Output
+
+**Time per iteration**: Wall-clock time for one training step (forward + backward + optimizer step)
+
+**MFU (Model FLOPS Utilization)**: Percentage of A100 bfloat16 peak FLOPS (312 TFLOPS) achieved
+
+```
+time per iteration: 85.32ms, MFU: 42.15%
+```
+
+Means:
+- Each iteration takes 85.32ms
+- Achieving ~131 TFLOPS (42.15% of 312 TFLOPS)
+- Good MFU is typically 40-60% for transformer models
+
+### Profiler Output
+
+When `--profile=True`, the profiler generates:
+- CPU/GPU time breakdown
+- Memory usage
+- Kernel launch overhead
+- Operator-level performance
+
+View in TensorBoard:
+1. Run: `tensorboard --logdir=bench_log`
+2. Navigate to: `http://localhost:6006`
+3. Click on "PyTorch Profiler" tab
+
+---
+
+## Configuration System
+
+All scripts use the same configuration system (`configurator.py`):
+
+### Priority Order (highest to lowest)
+
+1. Command-line arguments: `--param=value`
+2. Config file: `config/file.py`
+3. Default values in script
+
+### Example
+
+```bash
+python train.py config/train_gpt2.py --batch_size=16
+```
+
+This:
+1. Loads defaults from `train.py`
+2. Overrides with values from `config/train_gpt2.py`
+3. Overrides `batch_size` to 16
+
+### Creating Config Files
+
+Config files are just Python files that set variables:
+
+```python config/my_config.py
+# Training setup
+out_dir = 'out-my-run'
+batch_size = 32
+learning_rate = 3e-4
+
+# Model
+n_layer = 8
+n_head = 8
+n_embd = 512
+
+# Data
+dataset = 'my_dataset'
+block_size = 512
+```
+
+Use with:
+```bash
+python train.py config/my_config.py
+```
+
+---
+
+## Environment Variables
+
+For distributed training, these are set automatically by `torchrun`:
+
+- `RANK`: Global rank of the process
+- `LOCAL_RANK`: Local rank on the node
+- `WORLD_SIZE`: Total number of processes
+
+Manual DDP without `torchrun` is not recommended.

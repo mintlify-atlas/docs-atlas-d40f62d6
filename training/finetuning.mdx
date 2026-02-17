@@ -1,0 +1,319 @@
+---
+title: Finetuning Pretrained Models
+description: Learn how to finetune pretrained GPT-2 models on custom datasets
+---
+
+# Finetuning Pretrained Models
+
+Finetuning allows you to adapt pretrained GPT-2 models to your specific use case with minimal training time. Instead of training from scratch, you start with OpenAI's pretrained weights and continue training on your domain-specific data.
+
+## Why Finetune?
+
+<CardGroup cols={2}>
+  <Card title="Faster Training" icon="bolt">
+    Finetuning can take just a few minutes compared to days of training from scratch
+  </Card>
+  
+  <Card title="Less Data Required" icon="database">
+    Leverage pretrained knowledge and train on smaller domain-specific datasets
+  </Card>
+  
+  <Card title="Better Results" icon="chart-line">
+    Start from strong pretrained weights instead of random initialization
+  </Card>
+  
+  <Card title="Lower Compute" icon="microchip">
+    Can finetune on a single GPU, no need for multi-GPU clusters
+  </Card>
+</CardGroup>
+
+## Available Pretrained Models
+
+NanoGPT supports loading any of OpenAI's GPT-2 checkpoints:
+
+| Model | Parameters | init_from Value |
+|-------|------------|----------------|
+| GPT-2 | 124M | `'gpt2'` |
+| GPT-2 Medium | 350M | `'gpt2-medium'` |
+| GPT-2 Large | 774M | `'gpt2-large'` |
+| GPT-2 XL | 1558M | `'gpt2-xl'` |
+
+<Tip>
+  The larger models generally produce better results but require more GPU memory and longer training times.
+</Tip>
+
+## Quick Start: Finetuning on Shakespeare
+
+Here's a complete example of finetuning GPT-2 XL (the largest model) on Shakespeare:
+
+<Steps>
+  <Step title="Prepare the Dataset">
+    Download and tokenize Shakespeare using GPT-2's BPE tokenizer:
+    
+    ```bash
+    python data/shakespeare/prepare.py
+    ```
+    
+    Unlike character-level training, this uses GPT-2's BPE tokenizer which matches the pretrained model's vocabulary.
+  </Step>
+  
+  <Step title="Run Finetuning">
+    Start finetuning with the provided configuration:
+    
+    ```bash
+    python train.py config/finetune_shakespeare.py
+    ```
+    
+    <Tip>
+      This finetunes GPT-2 XL and takes only a **few minutes** on a single GPU!
+    </Tip>
+  </Step>
+  
+  <Step title="Sample from Finetuned Model">
+    Generate Shakespeare-style text:
+    
+    ```bash
+    python sample.py --out_dir=out-shakespeare
+    ```
+  </Step>
+</Steps>
+
+## Finetuning Configuration
+
+Here's the complete configuration from `config/finetune_shakespeare.py`:
+
+```python
+import time
+
+out_dir = 'out-shakespeare'
+eval_interval = 5
+eval_iters = 40
+wandb_log = False
+
+dataset = 'shakespeare'
+init_from = 'gpt2-xl'  # Start from largest GPT-2 model
+
+# Only save checkpoints if validation loss improves
+always_save_checkpoint = False
+
+# Batch configuration
+# 1 batch_size * 32 grad_accum * 1024 tokens = 32,768 tokens/iter
+# Shakespeare has 301,966 tokens, so 1 epoch ~= 9.2 iters
+batch_size = 1
+gradient_accumulation_steps = 32
+max_iters = 20
+
+# Finetune at constant LR
+learning_rate = 3e-5
+decay_lr = False
+```
+
+## Key Finetuning Parameters
+
+### Learning Rate
+
+Finetuning requires a **much smaller learning rate** than training from scratch:
+
+<Tabs>
+  <Tab title="Finetuning">
+    ```python
+    learning_rate = 3e-5  # Small LR to avoid catastrophic forgetting
+    decay_lr = False      # Often use constant LR for finetuning
+    ```
+  </Tab>
+  
+  <Tab title="From Scratch">
+    ```python
+    learning_rate = 6e-4  # ~20x larger than finetuning
+    decay_lr = True       # Use cosine decay for long training runs
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Using too high a learning rate during finetuning can cause **catastrophic forgetting**, where the model loses its pretrained knowledge.
+</Warning>
+
+### Training Duration
+
+Finetuning typically requires far fewer iterations:
+
+```python
+max_iters = 20  # Just 20 iterations for Shakespeare finetuning
+```
+
+For the Shakespeare dataset:
+- **301,966 tokens** total
+- **32,768 tokens/iteration** (batch_size × grad_accum × block_size)
+- **1 epoch ≈ 9.2 iterations**
+
+### Batch Size and Gradient Accumulation
+
+```python
+batch_size = 1
+gradient_accumulation_steps = 32
+# Effective batch size: 1 * 32 * 1024 = 32,768 tokens per update
+```
+
+If you run out of memory, you can:
+- Decrease `batch_size` and increase `gradient_accumulation_steps` proportionally
+- Choose a smaller model (`gpt2` instead of `gpt2-xl`)
+- Decrease `block_size` (context length)
+
+## Model Initialization
+
+The `init_from` parameter controls model initialization:
+
+```python train.py:line_181-188
+if init_from.startswith('gpt2'):
+    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+    # Initialize from OpenAI GPT-2 weights
+    override_args = dict(dropout=dropout)
+    model = GPT.from_pretrained(init_from, override_args)
+    # Read off the created config params
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = getattr(model.config, k)
+```
+
+Available options:
+- `'gpt2'` - 124M parameters
+- `'gpt2-medium'` - 350M parameters  
+- `'gpt2-large'` - 774M parameters
+- `'gpt2-xl'` - 1558M parameters
+
+## Dropout for Finetuning
+
+You can add dropout during finetuning to prevent overfitting:
+
+```python
+# Override dropout when loading pretrained model
+init_from = 'gpt2-xl'
+dropout = 0.1  # Add 10% dropout for finetuning
+```
+
+<Tip>
+  For pretraining on large datasets, `dropout=0.0` is typically best. For finetuning on smaller datasets, try `dropout=0.1` or higher.
+</Tip>
+
+## Custom Finetuning Example
+
+Here's how to finetune GPT-2 Medium on your own dataset:
+
+```bash
+python train.py \
+    --init_from=gpt2-medium \
+    --dataset=your_dataset \
+    --batch_size=2 \
+    --gradient_accumulation_steps=16 \
+    --max_iters=100 \
+    --learning_rate=3e-5 \
+    --decay_lr=False \
+    --dropout=0.1 \
+    --eval_interval=10 \
+    --out_dir=out-your-model
+```
+
+## Expected Results
+
+### Shakespeare Finetuning (GPT-2 XL)
+
+- **Training time**: A few minutes on a single GPU
+- **Training iterations**: 20 iterations
+- **Model size**: 1558M parameters (GPT-2 XL)
+
+Example output:
+```
+THEODORE:
+Thou shalt sell me to the highest bidder: if I die,
+I sell thee to the first; if I go mad,
+I sell thee to the second; if I
+lie, I sell thee to the third; if I slay,
+I sell thee to the fourth: so buy or sell,
+I tell thee again, thou shalt not sell my
+possession.
+
+JULIET:
+And if thou steal, thou shalt not sell thyself.
+```
+
+<Tip>
+  The finetuned model produces much better Shakespeare-style text than training a small model from scratch, even with minimal training time.
+</Tip>
+
+## GPT-2 Baseline Performance
+
+For reference, here are the baseline losses of pretrained GPT-2 models on OpenWebText:
+
+| Model | Parameters | Train Loss | Val Loss |
+|-------|------------|------------|----------|
+| gpt2 | 124M | 3.11 | 3.12 |
+| gpt2-medium | 350M | 2.85 | 2.84 |
+| gpt2-large | 774M | 2.66 | 2.67 |
+| gpt2-xl | 1558M | 2.56 | 2.54 |
+
+<Warning>
+  Note that GPT-2 was trained on the closed WebText dataset, not OpenWebText. There is a domain gap between these datasets. When you finetune GPT-2 (124M) on OpenWebText, it reaches ~2.85 validation loss.
+</Warning>
+
+## Resuming Finetuning
+
+To resume finetuning from a checkpoint:
+
+```bash
+python train.py \
+    --init_from=resume \
+    --out_dir=out-shakespeare
+```
+
+This loads the model, optimizer state, and iteration count from `out-shakespeare/ckpt.pt`.
+
+## Memory Considerations
+
+If you encounter out-of-memory errors:
+
+<Steps>
+  <Step title="Choose a Smaller Model">
+    ```python
+    init_from = 'gpt2'  # Instead of 'gpt2-xl'
+    ```
+  </Step>
+  
+  <Step title="Reduce Context Length">
+    ```python
+    block_size = 512  # Instead of 1024
+    ```
+  </Step>
+  
+  <Step title="Decrease Batch Size">
+    ```python
+    batch_size = 1
+    gradient_accumulation_steps = 64  # Keep effective batch size the same
+    ```
+  </Step>
+  
+  <Step title="Use Mixed Precision">
+    ```python
+    dtype = 'float16'  # Already the default on most GPUs
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="From Scratch Training" icon="rocket" href="/training/from-scratch">
+    Learn how to train models from scratch on large datasets
+  </Card>
+  
+  <Card title="Distributed Training" icon="server" href="/training/distributed">
+    Scale finetuning across multiple GPUs
+  </Card>
+  
+  <Card title="Hyperparameters" icon="sliders" href="/training/hyperparameters">
+    Deep dive into training hyperparameters
+  </Card>
+  
+  <Card title="Sampling" icon="message" href="/inference/sampling">
+    Generate text from your finetuned models
+  </Card>
+</CardGroup>

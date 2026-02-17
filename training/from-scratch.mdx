@@ -1,0 +1,261 @@
+---
+title: Training from Scratch
+description: Learn how to train a GPT model from scratch using nanoGPT
+---
+
+# Training from Scratch
+
+Learn how to train a new GPT model from scratch on your own data. nanoGPT supports training character-level models on small datasets and larger BPE-based models on datasets like OpenWebText.
+
+## Quick Start: Shakespeare Character Model
+
+The fastest way to get started is to train a character-level GPT on Shakespeare's works.
+
+<Steps>
+  <Step title="Prepare the Dataset">
+    Download and tokenize the Shakespeare dataset:
+    
+    ```bash
+    python data/shakespeare_char/prepare.py
+    ```
+    
+    This creates `train.bin` and `val.bin` in the data directory.
+  </Step>
+  
+  <Step title="Start Training">
+    Train a small GPT model using the Shakespeare configuration:
+    
+    ```bash
+    python train.py config/train_shakespeare_char.py
+    ```
+    
+    <Tip>
+      On an A100 GPU, this training run takes about **3 minutes** and achieves a validation loss of **~1.47**.
+    </Tip>
+  </Step>
+  
+  <Step title="Sample from the Model">
+    Generate text from your trained model:
+    
+    ```bash
+    python sample.py --out_dir=out-shakespeare-char
+    ```
+  </Step>
+</Steps>
+
+## Model Configuration
+
+The Shakespeare character model uses these settings from `config/train_shakespeare_char.py`:
+
+```python
+# Model architecture
+n_layer = 6        # 6 transformer layers
+n_head = 6         # 6 attention heads per layer
+n_embd = 384       # 384 embedding dimensions
+block_size = 256   # context length of 256 characters
+dropout = 0.2      # 20% dropout for regularization
+
+# Training settings
+batch_size = 64
+max_iters = 5000
+learning_rate = 1e-3
+min_lr = 1e-4
+warmup_iters = 100
+```
+
+## Training on CPU or MacBook
+
+If you don't have a GPU, you can still train a smaller model:
+
+```bash
+python train.py config/train_shakespeare_char.py \
+  --device=cpu \
+  --compile=False \
+  --eval_iters=20 \
+  --log_interval=1 \
+  --block_size=64 \
+  --batch_size=12 \
+  --n_layer=4 \
+  --n_head=4 \
+  --n_embd=128 \
+  --max_iters=2000 \
+  --lr_decay_iters=2000 \
+  --dropout=0.0
+```
+
+<Tip>
+  On Apple Silicon Macbooks, use `--device=mps` instead of `--device=cpu` for 2-3x faster training using the Metal Performance Shaders GPU.
+</Tip>
+
+<Warning>
+  CPU training takes about 3 minutes and achieves a validation loss of **~1.88** (worse than GPU training but still functional).
+</Warning>
+
+## Reproducing GPT-2 on OpenWebText
+
+For serious deep learning work, train a GPT-2 (124M parameter) model on OpenWebText.
+
+<Steps>
+  <Step title="Download and Tokenize OpenWebText">
+    ```bash
+    python data/openwebtext/prepare.py
+    ```
+    
+    This downloads the OpenWebText dataset and tokenizes it using GPT-2's BPE tokenizer, creating `train.bin` and `val.bin` files.
+  </Step>
+  
+  <Step title="Train GPT-2 (124M)">
+    To reproduce GPT-2, you'll need at least an **8x A100 40GB node**:
+    
+    ```bash
+    torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+    ```
+    
+    <Warning>
+      This training run takes about **4 days** and reaches a validation loss of **~2.85**.
+    </Warning>
+  </Step>
+</Steps>
+
+## GPT-2 Training Configuration
+
+The GPT-2 configuration from `config/train_gpt2.py` uses these settings:
+
+```python
+# Total batch size: ~0.5M tokens
+# 12 batch size * 1024 block size * 40 grad_accum * 8 GPUs = 491,520
+batch_size = 12
+block_size = 1024
+gradient_accumulation_steps = 5 * 8  # 40 total
+
+# 300B total tokens
+max_iters = 600000
+lr_decay_iters = 600000
+
+# Model architecture (GPT-2 124M defaults)
+n_layer = 12
+n_head = 12
+n_embd = 768
+dropout = 0.0
+bias = False
+
+# Optimizer
+learning_rate = 6e-4
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+```
+
+## Model Initialization Options
+
+When starting training, you can choose how to initialize the model using the `init_from` parameter:
+
+<Tabs>
+  <Tab title="From Scratch">
+    ```python
+    init_from = 'scratch'
+    ```
+    
+    Initializes a new model with random weights. The vocabulary size is determined from the dataset's `meta.pkl` file, or defaults to 50304 (GPT-2's 50257 rounded up for efficiency).
+  </Tab>
+  
+  <Tab title="Resume Training">
+    ```python
+    init_from = 'resume'
+    ```
+    
+    Resumes training from a checkpoint in the `out_dir` directory. Loads model weights, optimizer state, and training iteration count.
+  </Tab>
+  
+  <Tab title="From Pretrained">
+    ```python
+    init_from = 'gpt2'  # or 'gpt2-medium', 'gpt2-large', 'gpt2-xl'
+    ```
+    
+    Initializes from OpenAI's pretrained GPT-2 weights. See [Finetuning](/training/finetuning) for more details.
+  </Tab>
+</Tabs>
+
+## Expected Results
+
+### Character-Level Shakespeare
+
+- **Training time**: ~3 minutes on A100 GPU
+- **Best validation loss**: 1.4697
+- **Model size**: 6 layers, 6 heads, 384 embedding dimensions
+
+Example output:
+```
+ANGELO:
+And cowards it be strawn to my bed,
+And thrust the gates of my threats,
+Because he that ale away, and hang'd
+An one with him.
+
+DUKE VINCENTIO:
+I thank your eyes against it.
+```
+
+### GPT-2 (124M) on OpenWebText
+
+- **Training time**: ~4 days on 8x A100 40GB
+- **Final validation loss**: ~2.85
+- **Model size**: 124M parameters
+- **Total tokens**: 300B tokens
+
+<Tip>
+  For reference, the original GPT-2 (124M) checkpoint evaluated on OpenWebText gets a validation loss of **3.11**, but when finetuned on OWT it reaches **~2.85**, matching the from-scratch training.
+</Tip>
+
+## Performance Optimization
+
+### PyTorch 2.0 Compilation
+
+By default, nanoGPT uses `torch.compile()` which significantly improves training speed:
+
+```python
+compile = True  # Reduces iteration time from ~250ms to ~135ms
+```
+
+<Warning>
+  PyTorch 2.0 compilation is not available on all platforms (e.g., Windows). If you encounter errors, disable it with `--compile=False`.
+</Warning>
+
+### Mixed Precision Training
+
+The training script automatically uses mixed precision:
+
+```python
+# Automatically selects bfloat16 if supported, otherwise float16
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+```
+
+## Single GPU Training
+
+To train on a single GPU, simply run the script directly:
+
+```bash
+python train.py --batch_size=32 --compile=False
+```
+
+You can override any configuration parameter via command line arguments.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Finetuning" icon="wand-magic-sparkles" href="/training/finetuning">
+    Learn how to finetune pretrained GPT-2 models on your own data
+  </Card>
+  
+  <Card title="Distributed Training" icon="server" href="/training/distributed">
+    Scale training across multiple GPUs and nodes
+  </Card>
+  
+  <Card title="Hyperparameters" icon="sliders" href="/training/hyperparameters">
+    Understand and tune training hyperparameters
+  </Card>
+  
+  <Card title="Sampling" icon="message" href="/inference/sampling">
+    Generate text from your trained models
+  </Card>
+</CardGroup>

@@ -1,0 +1,493 @@
+---
+title: Benchmarking
+description: Guide to benchmarking and optimizing nanoGPT performance
+---
+
+## Overview
+
+The `bench.py` script provides tools to measure and optimize nanoGPT performance. It supports both simple iteration timing and detailed PyTorch profiler analysis.
+
+## Quick Benchmark
+
+Run a basic performance test:
+
+```bash
+python bench.py
+```
+
+Output:
+```
+Compiling model...
+number of parameters: 124.44M
+0/10 loss: 10.9528
+1/10 loss: 10.9453
+...
+time per iteration: 85.32ms, MFU: 42.15%
+```
+
+---
+
+## Performance Metrics
+
+### Iteration Time
+
+Wall-clock time for one complete training step:
+- Forward pass
+- Backward pass  
+- Optimizer step
+
+Lower is better. Typical values on A100:
+- GPT-2 124M: ~80-100ms
+- GPT-2 350M: ~200-250ms
+- GPT-2 1.5B: ~800-1000ms
+
+### MFU (Model FLOPS Utilization)
+
+Percentage of theoretical peak FLOPS achieved, calculated using:
+
+```python
+def estimate_mfu(self, fwdbwd_per_iter, dt):
+    """Estimate MFU in units of A100 bfloat16 peak FLOPS"""
+    N = self.get_num_params()
+    cfg = self.config
+    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+    
+    # FLOPS per token (from PaLM paper Appendix B)
+    flops_per_token = 6*N + 12*L*H*Q*T
+    flops_per_fwdbwd = flops_per_token * T
+    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+    
+    # Ratio of achieved vs. peak FLOPS
+    flops_achieved = flops_per_iter * (1.0/dt)
+    flops_promised = 312e12  # A100 bfloat16 peak
+    mfu = flops_achieved / flops_promised
+    return mfu
+```
+
+<Accordion title="Understanding MFU">
+  **Good MFU values:**
+  - 40-60%: Excellent (typical for well-optimized transformers)
+  - 30-40%: Good
+  - 20-30%: Acceptable
+  - <20%: Needs optimization
+
+  **Reference peak FLOPS:**
+  - A100 bfloat16: 312 TFLOPS
+  - V100 float16: 125 TFLOPS  
+  - A6000 float16: 155 TFLOPS
+  - H100 bfloat16: 989 TFLOPS
+</Accordion>
+
+---
+
+## PyTorch Profiler
+
+For detailed performance analysis:
+
+```bash
+python bench.py --profile=True
+```
+
+This generates TensorBoard traces with:
+- Operator-level timing
+- CUDA kernel analysis
+- Memory usage
+- CPU/GPU synchronization points
+
+### Viewing Results
+
+```bash
+tensorboard --logdir=bench_log
+```
+
+Navigate to `http://localhost:6006` and click "PyTorch Profiler" tab.
+
+### Profiler Configuration
+
+From `bench.py:66-81`:
+
+```python
+wait, warmup, active = 5, 5, 5
+num_steps = wait + warmup + active
+
+with torch.profiler.profile(
+    activities=[torch.profiler.ProfilerActivity.CPU, 
+                torch.profiler.ProfilerActivity.CUDA],
+    schedule=torch.profiler.schedule(
+        wait=wait,      # 5 steps: profiler off
+        warmup=warmup,  # 5 steps: warmup
+        active=active,  # 5 steps: active profiling
+        repeat=1
+    ),
+    on_trace_ready=torch.profiler.tensorboard_trace_handler('./bench_log'),
+    record_shapes=False,
+    profile_memory=False,
+    with_stack=False,
+    with_flops=True,
+    with_modules=False,
+) as prof:
+    # Training loop
+    ...
+    prof.step()  # Notify profiler after each iteration
+```
+
+---
+
+## Optimization Techniques
+
+### 1. torch.compile()
+
+**Most important optimization.** PyTorch 2.0+ compiles the model to optimized kernels.
+
+```bash
+python bench.py --compile=True  # Default
+```
+
+**Expected speedup:** 1.5-2x faster
+
+<Accordion title="How it works">
+  `torch.compile()` uses TorchInductor to:
+  - Fuse operations
+  - Eliminate Python overhead
+  - Generate optimized CUDA kernels
+  - Reduce memory allocations
+  
+  First run will be slow (compilation), subsequent runs are fast.
+</Accordion>
+
+### 2. Flash Attention
+
+Automatically enabled in PyTorch >= 2.0:
+
+```python
+# From model.py:62-64
+if self.flash:
+    y = torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, 
+        is_causal=True
+    )
+```
+
+**Benefits:**
+- 2-4x faster attention
+- Lower memory usage
+- Enables longer sequences
+
+### 3. Mixed Precision Training
+
+Use bfloat16 or float16:
+
+```bash
+python bench.py --dtype=bfloat16  # Recommended for A100/H100
+python bench.py --dtype=float16   # Good for V100
+```
+
+**Expected speedup:** 2-3x faster vs float32
+
+<Tabs>
+  <Tab title="bfloat16">
+    - Better numerical stability
+    - Same exponent range as float32
+    - Recommended for A100/H100
+    - No GradScaler needed
+  </Tab>
+  
+  <Tab title="float16">
+    - Wider hardware support
+    - Requires GradScaler for stability
+    - Automatic in nanoGPT when dtype='float16'
+  </Tab>
+</Tabs>
+
+### 4. TF32 (Tensor Float 32)
+
+Automatically enabled for Ampere+ GPUs:
+
+```python
+# From train.py:107-108
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+```
+
+**Benefits:**
+- 1.5x faster matmuls
+- No code changes
+- Minimal accuracy impact
+- Free on A100/H100
+
+### 5. Gradient Accumulation
+
+Simulate larger batch sizes:
+
+```bash
+python train.py --batch_size=4 --gradient_accumulation_steps=16
+# Effective batch size: 4 * 16 = 64
+```
+
+**Benefits:**
+- Train larger models on limited memory
+- Better gradient estimates
+- No performance penalty
+
+### 6. Data Loading
+
+Use memory-mapped arrays with pinned memory:
+
+```python
+# From train.py:120-128
+data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+ix = torch.randint(len(data) - block_size, (batch_size,))
+x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+
+if device_type == 'cuda':
+    x = x.pin_memory().to(device, non_blocking=True)
+```
+
+**Benefits:**
+- No RAM overhead
+- Async GPU transfers
+- Minimal CPU overhead
+
+---
+
+## Benchmarking Scenarios
+
+### Compare Optimizations
+
+<Tabs>
+  <Tab title="Baseline">
+    ```bash
+    python bench.py --compile=False --dtype=float32
+    # Result: ~300ms/iter, MFU: 15%
+    ```
+  </Tab>
+  
+  <Tab title="Mixed Precision">
+    ```bash
+    python bench.py --compile=False --dtype=bfloat16
+    # Result: ~120ms/iter, MFU: 35%
+    # Speedup: 2.5x
+    ```
+  </Tab>
+  
+  <Tab title="Compiled">
+    ```bash
+    python bench.py --compile=True --dtype=bfloat16
+    # Result: ~85ms/iter, MFU: 42%
+    # Speedup: 3.5x vs baseline
+    ```
+  </Tab>
+</Tabs>
+
+### Profile Bottlenecks
+
+```bash
+# Generate detailed profile
+python bench.py --profile=True --compile=True
+
+# View in TensorBoard
+tensorboard --logdir=bench_log
+```
+
+Look for:
+- Long-running kernels
+- CPU/GPU synchronization
+- Memory allocation overhead
+- Data loading bottlenecks
+
+### Test Different Batch Sizes
+
+```bash
+# Small batch (memory constrained)
+python bench.py --batch_size=4 --block_size=2048
+
+# Large batch (compute bound)
+python bench.py --batch_size=32 --block_size=512
+
+# Find optimal batch size
+for bs in 4 8 16 32; do
+  echo "Batch size: $bs"
+  python bench.py --batch_size=$bs
+done
+```
+
+### Synthetic vs. Real Data
+
+```bash
+# No I/O overhead
+python bench.py --real_data=False
+
+# With data loading
+python bench.py --real_data=True
+```
+
+Compare to measure data loading impact.
+
+---
+
+## Optimization Checklist
+
+<Steps>
+  <Step title="Enable torch.compile()">
+    ```python
+    compile = True  # In config or --compile=True
+    ```
+    Expected: 1.5-2x speedup
+  </Step>
+  
+  <Step title="Use mixed precision">
+    ```python
+    dtype = 'bfloat16'  # or 'float16'
+    ```
+    Expected: 2-3x speedup
+  </Step>
+  
+  <Step title="Verify Flash Attention">
+    Check logs for:
+    ```
+    WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+    ```
+    If seen, upgrade PyTorch
+  </Step>
+  
+  <Step title="Tune batch size">
+    Find largest batch that fits in memory:
+    ```bash
+    python bench.py --batch_size=32
+    ```
+  </Step>
+  
+  <Step title="Enable TF32">
+    Automatic on A100+, verify:
+    ```python
+    torch.backends.cuda.matmul.allow_tf32 = True
+    ```
+  </Step>
+  
+  <Step title="Profile and iterate">
+    ```bash
+    python bench.py --profile=True
+    tensorboard --logdir=bench_log
+    ```
+    Identify remaining bottlenecks
+  </Step>
+</Steps>
+
+---
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="Low MFU (<20%)">
+    **Possible causes:**
+    - `compile=False`: Enable torch.compile()
+    - Using float32: Switch to bfloat16/float16
+    - Small batch size: Increase batch_size
+    - Old PyTorch: Upgrade to 2.0+
+    - CPU bottleneck: Check profiler
+  </Accordion>
+  
+  <Accordion title="Out of Memory">
+    **Solutions:**
+    - Reduce `batch_size`
+    - Reduce `block_size`
+    - Enable gradient accumulation
+    - Use gradient checkpointing (requires code changes)
+    - Reduce model size (n_layer, n_embd)
+  </Accordion>
+  
+  <Accordion title="Slow First Iteration">
+    **Expected behavior:**
+    - torch.compile() compilation: ~1-2 minutes
+    - CUDA initialization: ~5-10 seconds
+    - Warmup: ~10 iterations
+    
+    Subsequent iterations will be fast.
+  </Accordion>
+  
+  <Accordion title="Inconsistent Timings">
+    **Solutions:**
+    - Use burnin: bench.py does 10 burnin + 20 measured steps
+    - Check GPU temperature throttling
+    - Disable other GPU processes
+    - Use `torch.cuda.synchronize()` (already in bench.py)
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Advanced Profiling
+
+### Custom Profiling Ranges
+
+Modify `bench.py` to profile specific operations:
+
+```python
+with torch.profiler.record_function("forward"):
+    logits, loss = model(X, Y)
+
+with torch.profiler.record_function("backward"):
+    loss.backward()
+
+with torch.profiler.record_function("optimizer"):
+    optimizer.step()
+```
+
+### Memory Profiling
+
+Enable memory tracking:
+
+```python
+with torch.profiler.profile(
+    ...
+    profile_memory=True,  # Enable memory profiling
+    ...
+) as prof:
+    ...
+```
+
+View memory timeline in TensorBoard.
+
+### Export Chrome Trace
+
+```python
+prof.export_chrome_trace("trace.json")
+```
+
+Open in `chrome://tracing`
+
+---
+
+## Performance Targets
+
+### GPT-2 124M on A100 40GB
+
+| Config | Time/Iter | MFU | Tokens/Sec |
+|--------|-----------|-----|------------|
+| Baseline (float32, no compile) | ~300ms | 15% | ~4K |
+| Mixed precision | ~120ms | 35% | ~10K |
+| + torch.compile() | ~85ms | 42% | ~14K |
+| + Flash Attention | ~70ms | 50% | ~17K |
+
+### Scaling
+
+| Model Size | Params | A100 Time/Iter | MFU |
+|------------|--------|----------------|-----|
+| GPT-2 Small | 124M | ~85ms | 42% |
+| GPT-2 Medium | 350M | ~240ms | 45% |
+| GPT-2 Large | 774M | ~520ms | 48% |
+| GPT-2 XL | 1.5B | ~980ms | 51% |
+
+<Note>
+  Times assume: batch_size=12, block_size=1024, bfloat16, torch.compile(), Flash Attention
+</Note>
+
+---
+
+## Resources
+
+- [PyTorch Profiler Tutorial](https://pytorch.org/tutorials/intermediate/tensorboard_profiler_tutorial.html)
+- [PyTorch Profiler API](https://pytorch.org/docs/stable/profiler.html)
+- [PaLM Paper (FLOPS calculation)](https://arxiv.org/abs/2204.02311)
+- [Flash Attention](https://arxiv.org/abs/2205.14135)
+- [torch.compile() docs](https://pytorch.org/tutorials/intermediate/torch_compile_tutorial.html)

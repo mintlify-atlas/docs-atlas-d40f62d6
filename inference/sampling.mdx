@@ -1,0 +1,176 @@
+---
+title: 'Sampling'
+description: 'Generate text from trained or pretrained GPT models'
+---
+
+## Overview
+
+The `sample.py` script provides a simple interface for text generation from both trained checkpoints and pretrained GPT-2 models. It supports various sampling strategies including temperature scaling and top-k sampling.
+
+## Basic Usage
+
+### Sampling from Trained Models
+
+After training a model, sample from the best checkpoint:
+
+```bash
+python sample.py --out_dir=out-shakespeare-char
+```
+
+This loads the checkpoint from the specified output directory and generates text based on the model's learned patterns.
+
+### Sampling from Pretrained GPT-2
+
+Sample from any pretrained GPT-2 variant without training:
+
+```bash
+python sample.py \
+    --init_from=gpt2-xl \
+    --start="What is the answer to life, the universe, and everything?" \
+    --num_samples=5 --max_new_tokens=100
+```
+
+Available pretrained models:
+- `gpt2` (124M parameters)
+- `gpt2-medium` (350M parameters)
+- `gpt2-large` (774M parameters)
+- `gpt2-xl` (1558M parameters)
+
+## Sampling Parameters
+
+<ParamField path="num_samples" type="int" default="10">
+  Number of independent samples to generate
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" default="500">
+  Maximum number of tokens to generate per sample
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0.8">
+  Controls randomness in generation:
+  - `1.0` = no change to model predictions
+  - `< 1.0` = less random, more focused
+  - `> 1.0` = more random, more diverse
+</ParamField>
+
+<ParamField path="top_k" type="int" default="200">
+  Retain only the top k most likely tokens, setting others to 0 probability. Lower values make output more focused.
+</ParamField>
+
+<ParamField path="seed" type="int" default="1337">
+  Random seed for reproducible generation
+</ParamField>
+
+## Prompt Strategies
+
+<Steps>
+  <Step title="Direct String Prompt">
+    Pass the prompt directly via command line:
+    
+    ```bash
+    python sample.py --start="Once upon a time"
+    ```
+  </Step>
+
+  <Step title="File-Based Prompt">
+    Load prompt from a text file using the `FILE:` prefix:
+    
+    ```bash
+    python sample.py --start=FILE:prompt.txt
+    ```
+    
+    The script reads the entire file content as the prompt:
+    
+    ```python sample.py:77-79
+    if start.startswith('FILE:'):
+        with open(start[5:], 'r', encoding='utf-8') as f:
+            start = f.read()
+    ```
+  </Step>
+
+  <Step title="Special Tokens">
+    Use special tokens like GPT-2's end-of-text marker:
+    
+    ```bash
+    python sample.py --start="<|endoftext|>"
+    ```
+  </Step>
+</Steps>
+
+## The Generate Method
+
+The core generation logic uses autoregressive sampling with temperature and top-k:
+
+```python model.py:305-330
+@torch.no_grad()
+def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    """
+    Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+    the sequence max_new_tokens times, feeding the predictions back into the model each time.
+    Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+    """
+    for _ in range(max_new_tokens):
+        # if the sequence context is growing too long we must crop it at block_size
+        idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+        # forward the model to get the logits for the index in the sequence
+        logits, _ = self(idx_cond)
+        # pluck the logits at the final step and scale by desired temperature
+        logits = logits[:, -1, :] / temperature
+        # optionally crop the logits to only the top k options
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('Inf')
+        # apply softmax to convert logits to (normalized) probabilities
+        probs = F.softmax(logits, dim=-1)
+        # sample from the distribution
+        idx_next = torch.multinomial(probs, num_samples=1)
+        # append sampled index to the running sequence and continue
+        idx = torch.cat((idx, idx_next), dim=1)
+
+    return idx
+```
+
+## Device Selection
+
+<CodeGroup>
+
+```bash CUDA GPU
+python sample.py --device=cuda
+```
+
+```bash CPU
+python sample.py --device=cpu
+```
+
+```bash Apple Silicon
+python sample.py --device=mps
+```
+
+```bash Specific GPU
+python sample.py --device=cuda:1
+```
+
+</CodeGroup>
+
+<Note>
+For Apple Silicon Macbooks with recent PyTorch, use `--device=mps` to leverage the on-chip GPU for 2-3x faster generation.
+</Note>
+
+## Complete Example
+
+Generate creative Shakespeare-style text with high temperature:
+
+```bash
+python sample.py \
+    --out_dir=out-shakespeare \
+    --start="ROMEO:" \
+    --num_samples=3 \
+    --max_new_tokens=200 \
+    --temperature=1.2 \
+    --top_k=100 \
+    --device=cuda
+```
+
+<Tip>
+Lower temperature (0.5-0.7) for more coherent, focused text. Higher temperature (1.0-1.5) for more creative, diverse outputs.
+</Tip>
