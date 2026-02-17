@@ -89,7 +89,7 @@ out_dir = 'out-shakespeare-char'
 
 During training, you'll see output like:
 
-```
+```text
 step 0: train loss 4.2812, val loss 4.2803
 step 100: train loss 2.4123, val loss 2.4532
 step 500: train loss 1.6234, val loss 1.7123
@@ -187,7 +187,7 @@ The script from `sample.py` will:
 
 After 3 minutes of training:
 
-```
+```text
 ANGELO:
 And cowards it be strawn to my bed,
 And thrust the gates of my threats,
@@ -214,7 +214,7 @@ Not bad for a character-level model! ¯\\_(ツ)_/¯
 
 The smaller CPU model produces slightly less coherent output:
 
-```
+```text
 GLEORKEN VINGHARD III:
 Whell's the couse, the came light gacks,
 And the for mought you in Aut fries the not high shee
@@ -286,19 +286,19 @@ warmup_iters = 100
 Congratulations! You've trained your first GPT model. Here's what to explore next:
 
 <CardGroup cols={2}>
-  <Card title="Finetune GPT-2" icon="sliders" href="/finetuning">
+  <Card title="Finetune GPT-2" icon="sliders" href="/training/finetuning">
     Get better results by finetuning a pretrained GPT-2 model
   </Card>
   
-  <Card title="Train on Custom Data" icon="database" href="/custom-datasets">
+  <Card title="Train on Custom Data" icon="database" href="/concepts/data-preparation">
     Learn how to prepare and train on your own datasets
   </Card>
   
-  <Card title="Reproduce GPT-2" icon="clone" href="/reproducing-gpt2">
+  <Card title="Reproduce GPT-2" icon="clone" href="/training/from-scratch">
     Train a GPT-2 (124M) model on OpenWebText from scratch
   </Card>
   
-  <Card title="Model Configuration" icon="gear" href="/configuration">
+  <Card title="Model Configuration" icon="gear" href="/concepts/configuration">
     Deep dive into hyperparameters and model architecture
   </Card>
 </CardGroup>
